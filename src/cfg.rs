@@ -72,9 +72,12 @@ pub struct Configuration {
     pub google_client_secret: Option<String>,
     /// Base URL for OAuth redirect (e.g. https://api.example.com). Used to build redirect_uri.
     pub base_url: String,
+
+    /// Auth cookie name for browser-based auth. Default "session".
+    pub cookie_name: String,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 pub enum Environment {
     Development,
     Production,
@@ -161,6 +164,7 @@ impl Configuration {
         let google_client_id = env_var_opt("GOOGLE_CLIENT_ID");
         let google_client_secret = env_var_opt("GOOGLE_CLIENT_SECRET");
         let base_url = env_var_opt("BASE_URL").unwrap_or_else(|| format!("http://localhost:{}", app_port));
+        let cookie_name = env_var_opt("COOKIE_NAME").unwrap_or_else(|| "session".to_string());
 
         Arc::new(Configuration {
             env,
@@ -177,6 +181,7 @@ impl Configuration {
             google_client_id,
             google_client_secret,
             base_url,
+            cookie_name,
         })
     }
 

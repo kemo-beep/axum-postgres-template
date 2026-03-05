@@ -12,11 +12,10 @@ use rand::Rng;
 use oauth2::TokenResponse;
 use serde::{Deserialize, Serialize};
 
-use crate::api_error::ApiError;
 use crate::auth::email_sender::EmailSender;
 use crate::auth::repository::{EmailCodeRepository, PasswordResetRepository, RbacRepository, TokenBlacklistRepository, User, UserRepository};
 use crate::cfg::Config;
-use crate::types::UserId;
+use crate::common::{ApiError, UserId};
 
 const CODE_EXPIRY_MINUTES: i64 = 15;
 const CODE_LENGTH: usize = 6;

@@ -1,0 +1,366 @@
+//! Org repository: orgs, workspaces, org_members, org_invites.
+
+use anyhow::Result;
+use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
+use sqlx::{PgPool, Row};
+use uuid::Uuid;
+
+use crate::common::{ApiError, OrgId, UserId, WorkspaceId};
+
+#[derive(Clone, Debug)]
+pub struct Org {
+    pub id: OrgId,
+    pub name: String,
+    pub slug: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Workspace {
+    pub id: WorkspaceId,
+    pub org_id: OrgId,
+    pub name: String,
+    pub slug: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct OrgMember {
+    pub org_id: OrgId,
+    pub user_id: UserId,
+    pub role: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone)]
+pub struct OrgRepository {
+    pool: PgPool,
+}
+
+impl OrgRepository {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    pub async fn create_org(&self, user_id: UserId, name: &str, slug: &str) -> Result<Org> {
+        let now = Utc::now();
+        let id = Uuid::now_v7();
+        let row = sqlx::query(
+            r#"
+            INSERT INTO orgs (id, name, slug, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $4)
+            RETURNING id, name, slug, created_at, updated_at
+            "#,
+        )
+        .bind(id)
+        .bind(name)
+        .bind(slug)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO org_members (org_id, user_id, role) VALUES ($1, $2, 'owner')",
+        )
+        .bind(id)
+        .bind(user_id.0)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(Org {
+            id: OrgId(row.get("id")),
+            name: row.get("name"),
+            slug: row.get("slug"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        })
+    }
+
+    pub async fn get_org(&self, id: OrgId) -> Result<Option<Org>> {
+        let row = sqlx::query(
+            "SELECT id, name, slug, created_at, updated_at FROM orgs WHERE id = $1",
+        )
+        .bind(id.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| Org {
+            id: OrgId(r.get("id")),
+            name: r.get("name"),
+            slug: r.get("slug"),
+            created_at: r.get("created_at"),
+            updated_at: r.get("updated_at"),
+        }))
+    }
+
+    pub async fn get_org_by_slug(&self, slug: &str) -> Result<Option<Org>> {
+        let row = sqlx::query(
+            "SELECT id, name, slug, created_at, updated_at FROM orgs WHERE slug = $1",
+        )
+        .bind(slug)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| Org {
+            id: OrgId(r.get("id")),
+            name: r.get("name"),
+            slug: r.get("slug"),
+            created_at: r.get("created_at"),
+            updated_at: r.get("updated_at"),
+        }))
+    }
+
+    pub async fn add_member(&self, org_id: OrgId, user_id: UserId, role: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO org_members (org_id, user_id, role) VALUES ($1, $2, $3) ON CONFLICT (org_id, user_id) DO UPDATE SET role = $3",
+        )
+        .bind(org_id.0)
+        .bind(user_id.0)
+        .bind(role)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn remove_member(&self, org_id: OrgId, user_id: UserId) -> Result<bool> {
+        let result = sqlx::query(
+            "DELETE FROM org_members WHERE org_id = $1 AND user_id = $2",
+        )
+        .bind(org_id.0)
+        .bind(user_id.0)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn get_user_orgs(&self, user_id: UserId) -> Result<Vec<Org>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT o.id, o.name, o.slug, o.created_at, o.updated_at
+            FROM orgs o
+            JOIN org_members om ON om.org_id = o.id
+            WHERE om.user_id = $1
+            ORDER BY o.name
+            "#,
+        )
+        .bind(user_id.0)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| Org {
+                id: OrgId(r.get("id")),
+                name: r.get("name"),
+                slug: r.get("slug"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+            })
+            .collect())
+    }
+
+    pub async fn get_org_members(&self, org_id: OrgId) -> Result<Vec<OrgMember>> {
+        let rows = sqlx::query(
+            "SELECT org_id, user_id, role, created_at FROM org_members WHERE org_id = $1 ORDER BY created_at",
+        )
+        .bind(org_id.0)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| OrgMember {
+                org_id: OrgId(r.get("org_id")),
+                user_id: UserId(r.get("user_id")),
+                role: r.get("role"),
+                created_at: r.get("created_at"),
+            })
+            .collect())
+    }
+
+    pub async fn get_member_role(&self, org_id: OrgId, user_id: UserId) -> Result<Option<String>> {
+        let row = sqlx::query_scalar::<_, String>(
+            "SELECT role FROM org_members WHERE org_id = $1 AND user_id = $2",
+        )
+        .bind(org_id.0)
+        .bind(user_id.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    /// Ensures the user is a member of the org. Returns Ok(()) if yes, ApiError::NotFound otherwise.
+    pub async fn ensure_user_in_org(
+        &self,
+        user_id: UserId,
+        org_id: OrgId,
+    ) -> Result<(), ApiError> {
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM org_members WHERE org_id = $1 AND user_id = $2)",
+        )
+        .bind(org_id.0)
+        .bind(user_id.0)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| ApiError::InternalError(e.into()))?;
+        if exists {
+            Ok(())
+        } else {
+            Err(ApiError::NotFound)
+        }
+    }
+
+    pub async fn create_workspace(&self, org_id: OrgId, name: &str, slug: &str) -> Result<Workspace> {
+        let now = Utc::now();
+        let id = Uuid::now_v7();
+        let row = sqlx::query(
+            r#"
+            INSERT INTO workspaces (id, org_id, name, slug, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $5)
+            RETURNING id, org_id, name, slug, created_at, updated_at
+            "#,
+        )
+        .bind(id)
+        .bind(org_id.0)
+        .bind(name)
+        .bind(slug)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(Workspace {
+            id: WorkspaceId(row.get("id")),
+            org_id: OrgId(row.get("org_id")),
+            name: row.get("name"),
+            slug: row.get("slug"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        })
+    }
+
+    pub async fn get_workspace(&self, id: WorkspaceId) -> Result<Option<Workspace>> {
+        let row = sqlx::query(
+            "SELECT id, org_id, name, slug, created_at, updated_at FROM workspaces WHERE id = $1",
+        )
+        .bind(id.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| Workspace {
+            id: WorkspaceId(r.get("id")),
+            org_id: OrgId(r.get("org_id")),
+            name: r.get("name"),
+            slug: r.get("slug"),
+            created_at: r.get("created_at"),
+            updated_at: r.get("updated_at"),
+        }))
+    }
+
+    pub async fn list_workspaces(&self, org_id: OrgId) -> Result<Vec<Workspace>> {
+        let rows = sqlx::query(
+            "SELECT id, org_id, name, slug, created_at, updated_at FROM workspaces WHERE org_id = $1 ORDER BY name",
+        )
+        .bind(org_id.0)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| Workspace {
+                id: WorkspaceId(r.get("id")),
+                org_id: OrgId(r.get("org_id")),
+                name: r.get("name"),
+                slug: r.get("slug"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+            })
+            .collect())
+    }
+
+    /// Ensures the user can access the workspace (is org member; optionally workspace member).
+    /// For now: user must be org member (workspace inherits org access).
+    pub async fn ensure_workspace_access(
+        &self,
+        user_id: UserId,
+        workspace_id: WorkspaceId,
+    ) -> Result<(), ApiError> {
+        let workspace = self
+            .get_workspace(workspace_id)
+            .await
+            .map_err(|e| ApiError::InternalError(e.into()))?
+            .ok_or(ApiError::NotFound)?;
+        self.ensure_user_in_org(user_id, workspace.org_id)
+            .await
+    }
+
+    pub fn hash_invite_token(token: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(token.as_bytes());
+        hex::encode(hasher.finalize())
+    }
+
+    pub async fn create_invite(
+        &self,
+        org_id: OrgId,
+        email: &str,
+        role: &str,
+        invited_by: UserId,
+        token: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<Uuid> {
+        let id = Uuid::now_v7();
+        let token_hash = Self::hash_invite_token(token);
+        sqlx::query(
+            r#"
+            INSERT INTO org_invites (id, org_id, email, role, token_hash, expires_at, invited_by_user_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "#,
+        )
+        .bind(id)
+        .bind(org_id.0)
+        .bind(email)
+        .bind(role)
+        .bind(token_hash)
+        .bind(expires_at)
+        .bind(invited_by.0)
+        .execute(&self.pool)
+        .await?;
+        Ok(id)
+    }
+
+    pub async fn find_invite_by_token(&self, token: &str) -> Result<Option<InviteRow>> {
+        let token_hash = Self::hash_invite_token(token);
+        let row = sqlx::query(
+            r#"
+            SELECT id, org_id, email, role, expires_at, invited_by_user_id
+            FROM org_invites
+            WHERE token_hash = $1 AND expires_at > now() AND email IS NOT NULL
+            "#,
+        )
+        .bind(token_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| InviteRow {
+            id: r.get("id"),
+            org_id: OrgId(r.get("org_id")),
+            email: r.get("email"),
+            role: r.get("role"),
+            expires_at: r.get("expires_at"),
+            invited_by_user_id: UserId(r.get("invited_by_user_id")),
+        }))
+    }
+
+    pub async fn delete_invite(&self, id: Uuid) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM org_invites WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct InviteRow {
+    pub id: Uuid,
+    pub org_id: OrgId,
+    pub email: String,
+    pub role: String,
+    pub expires_at: DateTime<Utc>,
+    pub invited_by_user_id: UserId,
+}

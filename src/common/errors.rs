@@ -1,3 +1,5 @@
+//! API error types. Convert domain errors to `ApiError` at the handler boundary.
+
 use axum::{
     extract::rejection::JsonRejection,
     response::{IntoResponse, Response},

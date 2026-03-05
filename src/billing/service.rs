@@ -10,11 +10,10 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use tracing::info;
 
-use crate::api_error::ApiError;
 use crate::auth::repository::UserRepository;
 use crate::billing::repository::BillingRepository;
 use crate::cfg::StripeConfig;
-use crate::types::UserId;
+use crate::common::{ApiError, OrgId, UserId};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -47,6 +46,18 @@ impl BillingService {
         Ok((sub, credit))
     }
 
+    pub async fn list_transactions_by_org(
+        &self,
+        org_id: OrgId,
+    ) -> Result<(
+        Vec<crate::billing::repository::SubscriptionTransaction>,
+        Vec<crate::billing::repository::CreditTransaction>,
+    )> {
+        let sub = self.billing_repo.list_subscription_transactions_by_org(org_id).await?;
+        let credit = self.billing_repo.list_credit_transactions_by_org(org_id).await?;
+        Ok((sub, credit))
+    }
+
     pub fn new(
         stripe_config: StripeConfig,
         billing_repo: BillingRepository,
@@ -65,6 +76,7 @@ impl BillingService {
     pub async fn create_checkout_session(
         &self,
         user_id: UserId,
+        org_id: OrgId,
         mode: CheckoutSessionMode,
         price_id: &str,
         success_url: &str,
@@ -83,6 +95,10 @@ impl BillingService {
         params.success_url = Some(success_url);
         params.cancel_url = Some(cancel_url);
         params.client_reference_id = Some(&client_ref);
+        params.metadata = Some(std::collections::HashMap::from([
+            ("user_id".to_string(), user_id.0.to_string()),
+            ("org_id".to_string(), org_id.0.to_string()),
+        ]));
         params.line_items = Some(vec![CreateCheckoutSessionLineItems {
             price: Some(price_id.to_string()),
             quantity: Some(1),
@@ -242,6 +258,13 @@ impl BillingService {
             .ok_or_else(|| ApiError::InvalidRequest("Missing client_reference_id".into()))?;
         let user_id = UserId(uuid::Uuid::parse_str(user_id_str).map_err(|_| ApiError::InvalidRequest("Invalid user_id".into()))?);
 
+        let org_id = session
+            .get("metadata")
+            .and_then(|m| m.get("org_id"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .map(OrgId::from_uuid);
+
         let customer_id = Self::extract_id(Some(session), "customer")
             .ok_or_else(|| ApiError::InvalidRequest("Missing customer".into()))?;
 
@@ -265,25 +288,30 @@ impl BillingService {
                 .map_err(|e| ApiError::InternalError(e.into()))?
             {
                 Some(s) => s,
-                None => self
-                    .billing_repo
-                    .create_subscription(
-                        user_id,
-                        &customer_id,
-                        &sub_id,
-                        plan_id,
-                        "active",
-                        None,
-                        None,
-                    )
-                    .await
-                    .map_err(|e| ApiError::InternalError(e.into()))?,
+                None => {
+                    let org = org_id.ok_or_else(|| ApiError::InvalidRequest("Missing org_id in metadata".into()))?;
+                    self
+                        .billing_repo
+                        .create_subscription(
+                            user_id,
+                            org,
+                            &customer_id,
+                            &sub_id,
+                            plan_id,
+                            "active",
+                            None,
+                            None,
+                        )
+                        .await
+                        .map_err(|e| ApiError::InternalError(e.into()))?
+                }
             };
 
             let receipt_url = Self::extract_receipt_url(session);
             self.billing_repo
                 .add_subscription_transaction(
                     user_id,
+                    subscription.org_id.or(org_id),
                     subscription.id,
                     "created",
                     None,
@@ -317,9 +345,12 @@ impl BillingService {
 
             let receipt_url = Self::extract_receipt_url(session);
 
+            let org = org_id.ok_or_else(|| ApiError::InvalidRequest("Missing org_id in metadata".into()))?;
+
             self.billing_repo
                 .add_credit_transaction(
                     user_id,
+                    org,
                     package_id,
                     tokens,
                     amount_total,
@@ -334,7 +365,7 @@ impl BillingService {
 
             if tokens > 0 {
                 self.billing_repo
-                    .upsert_user_credits(user_id, tokens)
+                    .upsert_org_credits(org, tokens)
                     .await
                     .map_err(|e| ApiError::InternalError(e.into()))?;
             }

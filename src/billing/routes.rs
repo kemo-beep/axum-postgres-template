@@ -11,8 +11,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::api_error::ApiError;
-use crate::auth::extractor::RequireAuth;
+use axum::middleware::from_extractor_with_state;
+
+use crate::auth::extractor::{RequireAuth, RequireBillingManage, RequireOrgMember};
+use crate::common::ApiError;
 use crate::AppState;
 
 /// Stripe webhook handler. Verifies signature and returns 200 quickly.
@@ -23,8 +25,8 @@ use crate::AppState;
     tag = "Webhooks",
     responses(
         (status = 200, description = "Webhook accepted"),
-        (status = 400, description = "Invalid signature", body = crate::api_error::ApiErrorResp),
-        (status = 500, description = "Stripe not configured", body = crate::api_error::ApiErrorResp)
+        (status = 400, description = "Invalid signature", body = crate::common::ApiErrorResp),
+        (status = 500, description = "Stripe not configured", body = crate::common::ApiErrorResp)
     )
 )]
 pub async fn stripe_webhook(
@@ -90,7 +92,7 @@ pub struct TransactionItem {
     tag = "Billing",
     responses(
         (status = 200, description = "List of subscription plans"),
-        (status = 500, description = "Billing not configured", body = crate::api_error::ApiErrorResp)
+        (status = 500, description = "Billing not configured", body = crate::common::ApiErrorResp)
     )
 )]
 pub async fn list_plans(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
@@ -110,7 +112,7 @@ pub async fn list_plans(State(state): State<AppState>) -> Result<Json<serde_json
     tag = "Billing",
     responses(
         (status = 200, description = "List of token packages"),
-        (status = 500, description = "Billing not configured", body = crate::api_error::ApiErrorResp)
+        (status = 500, description = "Billing not configured", body = crate::common::ApiErrorResp)
     )
 )]
 pub async fn list_packages(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
@@ -132,14 +134,15 @@ pub async fn list_packages(State(state): State<AppState>) -> Result<Json<serde_j
     security(("bearer_auth" = [])),
     responses(
         (status = 200, description = "Checkout URL", body = UrlResponse),
-        (status = 400, description = "Invalid request", body = crate::api_error::ApiErrorResp),
-        (status = 401, description = "Unauthorized", body = crate::api_error::ApiErrorResp),
-        (status = 500, description = "Billing not configured", body = crate::api_error::ApiErrorResp)
+        (status = 400, description = "Invalid request", body = crate::common::ApiErrorResp),
+        (status = 401, description = "Unauthorized", body = crate::common::ApiErrorResp),
+        (status = 403, description = "Forbidden", body = crate::common::ApiErrorResp),
+        (status = 500, description = "Billing not configured", body = crate::common::ApiErrorResp)
     )
 )]
 pub async fn checkout(
     State(state): State<AppState>,
-    RequireAuth(user): RequireAuth,
+    RequireOrgMember(user, org_id): RequireOrgMember,
     req: Result<Json<CheckoutRequest>, JsonRejection>,
 ) -> Result<Json<UrlResponse>, ApiError> {
     let Json(req) = req?;
@@ -156,6 +159,7 @@ pub async fn checkout(
     let url = billing
         .create_checkout_session(
             user.id,
+            org_id,
             mode,
             &req.price_id,
             &req.success_url,
@@ -174,9 +178,10 @@ pub async fn checkout(
     security(("bearer_auth" = [])),
     responses(
         (status = 200, description = "Portal URL", body = UrlResponse),
-        (status = 400, description = "No Stripe customer", body = crate::api_error::ApiErrorResp),
-        (status = 401, description = "Unauthorized", body = crate::api_error::ApiErrorResp),
-        (status = 500, description = "Billing not configured", body = crate::api_error::ApiErrorResp)
+        (status = 400, description = "No Stripe customer", body = crate::common::ApiErrorResp),
+        (status = 401, description = "Unauthorized", body = crate::common::ApiErrorResp),
+        (status = 403, description = "Forbidden", body = crate::common::ApiErrorResp),
+        (status = 500, description = "Billing not configured", body = crate::common::ApiErrorResp)
     )
 )]
 pub async fn portal(
@@ -205,20 +210,21 @@ pub struct PortalQuery {
     security(("bearer_auth" = [])),
     responses(
         (status = 200, description = "Subscription and credit transactions"),
-        (status = 401, description = "Unauthorized", body = crate::api_error::ApiErrorResp),
-        (status = 500, description = "Billing not configured", body = crate::api_error::ApiErrorResp)
+        (status = 401, description = "Unauthorized", body = crate::common::ApiErrorResp),
+        (status = 403, description = "Forbidden", body = crate::common::ApiErrorResp),
+        (status = 500, description = "Billing not configured", body = crate::common::ApiErrorResp)
     )
 )]
 pub async fn transactions(
     State(state): State<AppState>,
-    RequireAuth(user): RequireAuth,
+    RequireOrgMember(_user, org_id): RequireOrgMember,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let billing = state.billing_service.as_ref().ok_or(ApiError::InternalError(
         anyhow::anyhow!("Billing not configured"),
     ))?;
 
     let (sub_tx, credit_tx) = billing
-        .list_transactions(user.id)
+        .list_transactions_by_org(org_id)
         .await
         .map_err(|e| ApiError::InternalError(e.into()))?;
 
@@ -228,11 +234,27 @@ pub async fn transactions(
     })))
 }
 
-pub fn billing_router() -> Router<AppState> {
-    Router::new()
-        .route("/plans", get(list_plans))
-        .route("/packages", get(list_packages))
+pub fn billing_router(state: &AppState) -> Router<AppState> {
+    let protected = Router::new()
         .route("/checkout", post(checkout))
         .route("/portal", get(portal))
         .route("/transactions", get(transactions))
+        .route_layer(from_extractor_with_state::<RequireBillingManage, _>(state.clone()));
+    Router::new()
+        .route("/plans", get(list_plans))
+        .route("/packages", get(list_packages))
+        .merge(protected)
+}
+
+/// Org-scoped billing router: mount at /v1/orgs/:org_id/billing
+pub fn org_billing_router(state: &AppState) -> Router<AppState> {
+    let protected = Router::new()
+        .route("/checkout", post(checkout))
+        .route("/portal", get(portal))
+        .route("/transactions", get(transactions))
+        .route_layer(from_extractor_with_state::<RequireBillingManage, _>(state.clone()));
+    Router::new()
+        .route("/plans", get(list_plans))
+        .route("/packages", get(list_packages))
+        .merge(protected)
 }

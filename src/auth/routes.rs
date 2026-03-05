@@ -8,15 +8,29 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
+use cookie::time::Duration as CookieDuration;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use utoipa::ToSchema;
 
-use crate::api_error::ApiError;
+use crate::common::ApiError;
 use crate::auth::extractor::RequireAuth;
-use crate::auth::repository::User;
+use crate::auth::repository::RbacRepository;
+use crate::cfg::Environment;
 use crate::AppState;
+
+fn build_auth_cookie(token: &str, cfg: &crate::cfg::Configuration) -> Cookie<'static> {
+    Cookie::build((cfg.cookie_name.clone(), token.to_string()))
+        .http_only(true)
+        .secure(cfg.env == Environment::Production)
+        .same_site(SameSite::Lax)
+        .path("/")
+        .max_age(CookieDuration::seconds(cfg.jwt_expiry_secs as i64))
+        .build()
+        .into_owned()
+}
 
 #[derive(Deserialize, ToSchema)]
 pub struct SendCodeRequest {
@@ -62,15 +76,8 @@ pub struct AuthResponse {
 pub struct UserResponse {
     pub id: String,
     pub email: String,
-}
-
-impl From<User> for UserResponse {
-    fn from(u: User) -> Self {
-        Self {
-            id: u.id.0.to_string(),
-            email: u.email,
-        }
-    }
+    pub roles: Vec<String>,
+    pub permissions: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -115,9 +122,9 @@ pub fn router() -> Router<AppState> {
     request_body = SendCodeRequest,
     responses(
         (status = 200, description = "Code sent", body = inline(serde_json::Value)),
-        (status = 400, description = "Bad request", body = crate::api_error::ApiErrorResp),
-        (status = 429, description = "Too many requests", body = crate::api_error::ApiErrorResp),
-        (status = 500, description = "Internal error", body = crate::api_error::ApiErrorResp)
+        (status = 400, description = "Bad request", body = crate::common::ApiErrorResp),
+        (status = 429, description = "Too many requests", body = crate::common::ApiErrorResp),
+        (status = 500, description = "Internal error", body = crate::common::ApiErrorResp)
     )
 )]
 pub async fn send_code(
@@ -141,15 +148,16 @@ pub async fn send_code(
     request_body = VerifyCodeRequest,
     responses(
         (status = 200, description = "Token", body = AuthResponse),
-        (status = 400, description = "Bad request", body = crate::api_error::ApiErrorResp),
-        (status = 401, description = "Invalid code", body = crate::api_error::ApiErrorResp),
-        (status = 500, description = "Internal error", body = crate::api_error::ApiErrorResp)
+        (status = 400, description = "Bad request", body = crate::common::ApiErrorResp),
+        (status = 401, description = "Invalid code", body = crate::common::ApiErrorResp),
+        (status = 500, description = "Internal error", body = crate::common::ApiErrorResp)
     )
 )]
 pub async fn verify_code(
     State(state): State<AppState>,
+    jar: CookieJar,
     req: Result<Json<VerifyCodeRequest>, JsonRejection>,
-) -> Result<Json<AuthResponse>, ApiError> {
+) -> Result<(CookieJar, Json<AuthResponse>), ApiError> {
     let Json(req) = req?;
     let auth = state
         .auth_service
@@ -157,10 +165,14 @@ pub async fn verify_code(
         .ok_or(ApiError::InternalError(anyhow::anyhow!("Auth not configured")))?;
     let user = auth.verify_code(&req.email, &req.code).await?;
     let access_token = auth.create_access_token(user.id)?;
-    Ok(Json(AuthResponse {
-        access_token,
-        token_type: "Bearer".to_string(),
-    }))
+    let cookie = build_auth_cookie(&access_token, &state.cfg);
+    Ok((
+        jar.add(cookie),
+        Json(AuthResponse {
+            access_token,
+            token_type: "Bearer".to_string(),
+        }),
+    ))
 }
 
 /// Register with email and password. Rate limited.
@@ -171,16 +183,17 @@ pub async fn verify_code(
     request_body = RegisterRequest,
     responses(
         (status = 200, description = "Token", body = AuthResponse),
-        (status = 400, description = "Bad request", body = crate::api_error::ApiErrorResp),
-        (status = 409, description = "Email already exists", body = crate::api_error::ApiErrorResp),
-        (status = 429, description = "Too many requests", body = crate::api_error::ApiErrorResp),
-        (status = 500, description = "Internal error", body = crate::api_error::ApiErrorResp)
+        (status = 400, description = "Bad request", body = crate::common::ApiErrorResp),
+        (status = 409, description = "Email already exists", body = crate::common::ApiErrorResp),
+        (status = 429, description = "Too many requests", body = crate::common::ApiErrorResp),
+        (status = 500, description = "Internal error", body = crate::common::ApiErrorResp)
     )
 )]
 pub async fn register(
     State(state): State<AppState>,
+    jar: CookieJar,
     req: Result<Json<RegisterRequest>, JsonRejection>,
-) -> Result<Json<AuthResponse>, ApiError> {
+) -> Result<(CookieJar, Json<AuthResponse>), ApiError> {
     let Json(req) = req?;
     let auth = state
         .auth_service
@@ -188,10 +201,14 @@ pub async fn register(
         .ok_or(ApiError::InternalError(anyhow::anyhow!("Auth not configured")))?;
     let user = auth.register(&req.email, &req.password).await?;
     let access_token = auth.create_access_token(user.id)?;
-    Ok(Json(AuthResponse {
-        access_token,
-        token_type: "Bearer".to_string(),
-    }))
+    let cookie = build_auth_cookie(&access_token, &state.cfg);
+    Ok((
+        jar.add(cookie),
+        Json(AuthResponse {
+            access_token,
+            token_type: "Bearer".to_string(),
+        }),
+    ))
 }
 
 /// Login with email and password. Rate limited.
@@ -202,16 +219,17 @@ pub async fn register(
     request_body = LoginRequest,
     responses(
         (status = 200, description = "Token", body = AuthResponse),
-        (status = 400, description = "Bad request", body = crate::api_error::ApiErrorResp),
-        (status = 401, description = "Invalid credentials", body = crate::api_error::ApiErrorResp),
-        (status = 429, description = "Too many requests", body = crate::api_error::ApiErrorResp),
-        (status = 500, description = "Internal error", body = crate::api_error::ApiErrorResp)
+        (status = 400, description = "Bad request", body = crate::common::ApiErrorResp),
+        (status = 401, description = "Invalid credentials", body = crate::common::ApiErrorResp),
+        (status = 429, description = "Too many requests", body = crate::common::ApiErrorResp),
+        (status = 500, description = "Internal error", body = crate::common::ApiErrorResp)
     )
 )]
 pub async fn login(
     State(state): State<AppState>,
+    jar: CookieJar,
     req: Result<Json<LoginRequest>, JsonRejection>,
-) -> Result<Json<AuthResponse>, ApiError> {
+) -> Result<(CookieJar, Json<AuthResponse>), ApiError> {
     let Json(req) = req?;
     let auth = state
         .auth_service
@@ -219,10 +237,14 @@ pub async fn login(
         .ok_or(ApiError::InternalError(anyhow::anyhow!("Auth not configured")))?;
     let user = auth.login_password(&req.email, &req.password).await?;
     let access_token = auth.create_access_token(user.id)?;
-    Ok(Json(AuthResponse {
-        access_token,
-        token_type: "Bearer".to_string(),
-    }))
+    let cookie = build_auth_cookie(&access_token, &state.cfg);
+    Ok((
+        jar.add(cookie),
+        Json(AuthResponse {
+            access_token,
+            token_type: "Bearer".to_string(),
+        }),
+    ))
 }
 
 /// Redirect to Google OAuth consent screen.
@@ -232,7 +254,7 @@ pub async fn login(
     tag = "Auth",
     responses(
         (status = 307, description = "Redirect to Google"),
-        (status = 500, description = "Google OAuth not configured", body = crate::api_error::ApiErrorResp)
+        (status = 500, description = "Google OAuth not configured", body = crate::common::ApiErrorResp)
     )
 )]
 pub async fn google_redirect(State(state): State<AppState>) -> Result<Redirect, ApiError> {
@@ -273,14 +295,15 @@ pub async fn google_redirect(State(state): State<AppState>) -> Result<Redirect, 
     params(("code" = String, Query, description = "OAuth code from Google")),
     responses(
         (status = 200, description = "Token", body = AuthResponse),
-        (status = 400, description = "Bad request", body = crate::api_error::ApiErrorResp),
-        (status = 500, description = "Internal error", body = crate::api_error::ApiErrorResp)
+        (status = 400, description = "Bad request", body = crate::common::ApiErrorResp),
+        (status = 500, description = "Internal error", body = crate::common::ApiErrorResp)
     )
 )]
 pub async fn google_callback(
     State(state): State<AppState>,
+    jar: CookieJar,
     Query(query): Query<GoogleCallbackQuery>,
-) -> Result<Json<AuthResponse>, ApiError> {
+) -> Result<(CookieJar, Json<AuthResponse>), ApiError> {
     let auth = state
         .auth_service
         .as_ref()
@@ -289,10 +312,14 @@ pub async fn google_callback(
     let redirect_uri = format!("{}/v1/auth/google/callback", state.cfg.base_url.trim_end_matches('/'));
     let user = auth.login_google(&query.code, &redirect_uri).await?;
     let access_token = auth.create_access_token(user.id)?;
-    Ok(Json(AuthResponse {
-        access_token,
-        token_type: "Bearer".to_string(),
-    }))
+    let cookie = build_auth_cookie(&access_token, &state.cfg);
+    Ok((
+        jar.add(cookie),
+        Json(AuthResponse {
+            access_token,
+            token_type: "Bearer".to_string(),
+        }),
+    ))
 }
 
 /// Request a password reset email. Rate limited.
@@ -303,8 +330,8 @@ pub async fn google_callback(
     request_body = PasswordResetRequest,
     responses(
         (status = 200, description = "If email exists, reset link sent", body = inline(serde_json::Value)),
-        (status = 429, description = "Too many requests", body = crate::api_error::ApiErrorResp),
-        (status = 500, description = "Internal error", body = crate::api_error::ApiErrorResp)
+        (status = 429, description = "Too many requests", body = crate::common::ApiErrorResp),
+        (status = 500, description = "Internal error", body = crate::common::ApiErrorResp)
     )
 )]
 pub async fn password_reset_request(
@@ -328,8 +355,8 @@ pub async fn password_reset_request(
     request_body = PasswordResetConfirmRequest,
     responses(
         (status = 200, description = "Password reset", body = inline(serde_json::Value)),
-        (status = 400, description = "Invalid or expired token", body = crate::api_error::ApiErrorResp),
-        (status = 500, description = "Internal error", body = crate::api_error::ApiErrorResp)
+        (status = 400, description = "Invalid or expired token", body = crate::common::ApiErrorResp),
+        (status = 500, description = "Internal error", body = crate::common::ApiErrorResp)
     )
 )]
 pub async fn password_reset_confirm(
@@ -345,7 +372,7 @@ pub async fn password_reset_confirm(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-/// Logout (blacklist the current token). Requires Authorization: Bearer &lt;token&gt;.
+/// Logout (blacklist the current token). Requires Authorization: Bearer or session cookie.
 #[utoipa::path(
     post,
     path = "/v1/auth/logout",
@@ -353,24 +380,28 @@ pub async fn password_reset_confirm(
     security(("bearer_auth" = [])),
     responses(
         (status = 200, description = "Logged out", body = inline(serde_json::Value)),
-        (status = 401, description = "Unauthorized", body = crate::api_error::ApiErrorResp)
+        (status = 401, description = "Unauthorized", body = crate::common::ApiErrorResp)
     )
 )]
 pub async fn logout(
     State(state): State<AppState>,
+    jar: CookieJar,
     headers: HeaderMap,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let token = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .ok_or(ApiError::Unauthorized)?;
+) -> Result<(CookieJar, Json<serde_json::Value>), ApiError> {
+    let token = crate::auth::extractor::token_from_headers_or_jar(
+        &headers,
+        &jar,
+        &state.cfg.cookie_name,
+    )
+    .ok_or(ApiError::Unauthorized)?;
     let auth = state
         .auth_service
         .as_ref()
         .ok_or(ApiError::InternalError(anyhow::anyhow!("Auth not configured")))?;
-    auth.logout(token).await?;
-    Ok(Json(serde_json::json!({ "ok": true })))
+    auth.logout(&token).await?;
+    let cookie_name = state.cfg.cookie_name.clone();
+    let cleared_jar = jar.remove(Cookie::build(cookie_name).path("/").removal());
+    Ok((cleared_jar, Json(serde_json::json!({ "ok": true }))))
 }
 
 /// Get current user. Requires Authorization: Bearer &lt;token&gt;.
@@ -381,9 +412,26 @@ pub async fn logout(
     security(("bearer_auth" = [])),
     responses(
         (status = 200, description = "Current user", body = UserResponse),
-        (status = 401, description = "Unauthorized", body = crate::api_error::ApiErrorResp)
+        (status = 401, description = "Unauthorized", body = crate::common::ApiErrorResp)
     )
 )]
-pub async fn me(RequireAuth(user): RequireAuth) -> Result<Json<UserResponse>, ApiError> {
-    Ok(Json(user.into()))
+pub async fn me(
+    State(state): State<AppState>,
+    RequireAuth(user): RequireAuth,
+) -> Result<Json<UserResponse>, ApiError> {
+    let rbac = RbacRepository::new(state.db.pool.clone());
+    let roles = rbac
+        .get_user_roles(user.id)
+        .await
+        .map_err(|e| ApiError::InternalError(e.into()))?;
+    let permissions = rbac
+        .get_user_permissions(user.id)
+        .await
+        .map_err(|e| ApiError::InternalError(e.into()))?;
+    Ok(Json(UserResponse {
+        id: user.id.0.to_string(),
+        email: user.email,
+        roles,
+        permissions,
+    }))
 }

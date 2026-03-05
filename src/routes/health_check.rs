@@ -3,7 +3,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use utoipa::ToSchema;
 
-use crate::api_error::{ApiError, ApiErrorResp};
+use crate::common::{ApiError, ApiErrorResp};
 
 #[derive(Serialize, ToSchema)]
 struct HealthResponse {

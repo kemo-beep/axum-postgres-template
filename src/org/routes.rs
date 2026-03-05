@@ -1,0 +1,318 @@
+//! Org routes: orgs, workspaces, invites.
+
+use axum::{
+    extract::{Path, State},
+    routing::{get, post},
+    Json, Router,
+};
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
+use uuid::Uuid;
+
+use crate::auth::extractor::RequireAuth;
+use crate::common::{ApiError, OrgId};
+use crate::org::repository::{Org, Workspace};
+use crate::org::service::OrgService;
+use crate::AppState;
+
+#[derive(Deserialize, ToSchema)]
+pub struct CreateOrgRequest {
+    pub name: String,
+    pub slug: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct OrgResponse {
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct CreateWorkspaceRequest {
+    pub name: String,
+    pub slug: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct WorkspaceResponse {
+    pub id: String,
+    pub org_id: String,
+    pub name: String,
+    pub slug: String,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct CreateInviteRequest {
+    pub email: String,
+    pub role: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct InviteResponse {
+    pub token: String,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct AcceptInviteRequest {
+    pub token: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct OrgMemberResponse {
+    pub user_id: String,
+    pub role: String,
+}
+
+fn org_to_response(o: &Org) -> OrgResponse {
+    OrgResponse {
+        id: o.id.0.to_string(),
+        name: o.name.clone(),
+        slug: o.slug.clone(),
+    }
+}
+
+fn workspace_to_response(w: &Workspace) -> WorkspaceResponse {
+    WorkspaceResponse {
+        id: w.id.0.to_string(),
+        org_id: w.org_id.0.to_string(),
+        name: w.name.clone(),
+        slug: w.slug.clone(),
+    }
+}
+
+fn org_service(state: &AppState) -> OrgService {
+    let repo = crate::org::repository::OrgRepository::new(state.db.pool.clone());
+    let user_repo = crate::auth::repository::UserRepository::new(state.db.pool.clone());
+    OrgService::new(repo, user_repo)
+}
+
+/// List orgs the current user belongs to.
+#[utoipa::path(
+    get,
+    path = "/v1/orgs",
+    tag = "Orgs",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "List of orgs", body = Vec<OrgResponse>),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal error")
+    )
+)]
+pub async fn list_orgs(
+    State(state): State<AppState>,
+    RequireAuth(user): RequireAuth,
+) -> Result<Json<Vec<OrgResponse>>, ApiError> {
+    let svc = org_service(&state);
+    let orgs = svc.get_user_orgs(user.id).await?;
+    Ok(Json(orgs.iter().map(org_to_response).collect()))
+}
+
+/// Create a new org.
+#[utoipa::path(
+    post,
+    path = "/v1/orgs",
+    tag = "Orgs",
+    security(("bearer_auth" = [])),
+    request_body = CreateOrgRequest,
+    responses(
+        (status = 200, description = "Created org", body = OrgResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 409, description = "Slug already exists"),
+        (status = 500, description = "Internal error")
+    )
+)]
+pub async fn create_org(
+    State(state): State<AppState>,
+    RequireAuth(user): RequireAuth,
+    Json(req): Json<CreateOrgRequest>,
+) -> Result<Json<OrgResponse>, ApiError> {
+    let svc = org_service(&state);
+    let slug = req.slug.as_deref();
+    let org = svc.create_org(user.id, &req.name, slug).await?;
+    Ok(Json(org_to_response(&org)))
+}
+
+/// Get a single org by id.
+#[utoipa::path(
+    get,
+    path = "/v1/orgs/{org_id}",
+    tag = "Orgs",
+    params(("org_id" = String, Path, description = "Org UUID")),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Org", body = OrgResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Not found"),
+        (status = 500, description = "Internal error")
+    )
+)]
+pub async fn get_org(
+    State(state): State<AppState>,
+    RequireAuth(user): RequireAuth,
+    Path(org_id): Path<String>,
+) -> Result<Json<OrgResponse>, ApiError> {
+    let org_id = Uuid::parse_str(&org_id).map_err(|_| ApiError::NotFound)?;
+    let org_id = OrgId::from_uuid(org_id);
+    let svc = org_service(&state);
+    let org = svc.get_org(org_id, user.id).await?;
+    Ok(Json(org_to_response(&org)))
+}
+
+/// List members of an org.
+#[utoipa::path(
+    get,
+    path = "/v1/orgs/{org_id}/members",
+    tag = "Orgs",
+    params(("org_id" = String, Path, description = "Org UUID")),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "List of members", body = Vec<OrgMemberResponse>),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Not found"),
+        (status = 500, description = "Internal error")
+    )
+)]
+pub async fn list_members(
+    State(state): State<AppState>,
+    RequireAuth(user): RequireAuth,
+    Path(org_id): Path<String>,
+) -> Result<Json<Vec<OrgMemberResponse>>, ApiError> {
+    let org_id = Uuid::parse_str(&org_id).map_err(|_| ApiError::NotFound)?;
+    let org_id = OrgId::from_uuid(org_id);
+    let repo = crate::org::repository::OrgRepository::new(state.db.pool.clone());
+    repo.ensure_user_in_org(user.id, org_id).await?;
+    let members = repo.get_org_members(org_id).await.map_err(|e| ApiError::InternalError(e.into()))?;
+    Ok(Json(
+        members
+            .iter()
+            .map(|m| OrgMemberResponse {
+                user_id: m.user_id.0.to_string(),
+                role: m.role.clone(),
+            })
+            .collect(),
+    ))
+}
+
+/// Create an invite for an org.
+#[utoipa::path(
+    post,
+    path = "/v1/orgs/{org_id}/invites",
+    tag = "Orgs",
+    params(("org_id" = String, Path, description = "Org UUID")),
+    security(("bearer_auth" = [])),
+    request_body = CreateInviteRequest,
+    responses(
+        (status = 200, description = "Invite created", body = InviteResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Not found"),
+        (status = 500, description = "Internal error")
+    )
+)]
+pub async fn create_invite(
+    State(state): State<AppState>,
+    RequireAuth(user): RequireAuth,
+    Path(org_id): Path<String>,
+    Json(req): Json<CreateInviteRequest>,
+) -> Result<Json<InviteResponse>, ApiError> {
+    let org_id = Uuid::parse_str(&org_id).map_err(|_| ApiError::NotFound)?;
+    let org_id = OrgId::from_uuid(org_id);
+    let svc = org_service(&state);
+    let token = svc.create_invite(org_id, user.id, &req.email, &req.role).await?;
+    Ok(Json(InviteResponse { token }))
+}
+
+/// Accept an invite (current user).
+#[utoipa::path(
+    post,
+    path = "/v1/invites/accept",
+    tag = "Orgs",
+    security(("bearer_auth" = [])),
+    request_body = AcceptInviteRequest,
+    responses(
+        (status = 200, description = "Invite accepted"),
+        (status = 400, description = "Invalid or expired invite"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal error")
+    )
+)]
+pub async fn accept_invite(
+    State(state): State<AppState>,
+    RequireAuth(user): RequireAuth,
+    Json(req): Json<AcceptInviteRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let svc = org_service(&state);
+    svc.accept_invite(&req.token, user.id).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// List workspaces in an org.
+#[utoipa::path(
+    get,
+    path = "/v1/orgs/{org_id}/workspaces",
+    tag = "Orgs",
+    params(("org_id" = String, Path, description = "Org UUID")),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "List of workspaces", body = Vec<WorkspaceResponse>),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Not found"),
+        (status = 500, description = "Internal error")
+    )
+)]
+pub async fn list_workspaces(
+    State(state): State<AppState>,
+    RequireAuth(user): RequireAuth,
+    Path(org_id): Path<String>,
+) -> Result<Json<Vec<WorkspaceResponse>>, ApiError> {
+    let org_id = Uuid::parse_str(&org_id).map_err(|_| ApiError::NotFound)?;
+    let org_id = OrgId::from_uuid(org_id);
+    let svc = org_service(&state);
+    let workspaces = svc.list_workspaces(org_id, user.id).await?;
+    Ok(Json(workspaces.iter().map(workspace_to_response).collect()))
+}
+
+/// Create a workspace in an org.
+#[utoipa::path(
+    post,
+    path = "/v1/orgs/{org_id}/workspaces",
+    tag = "Orgs",
+    params(("org_id" = String, Path, description = "Org UUID")),
+    security(("bearer_auth" = [])),
+    request_body = CreateWorkspaceRequest,
+    responses(
+        (status = 200, description = "Created workspace", body = WorkspaceResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Not found"),
+        (status = 500, description = "Internal error")
+    )
+)]
+pub async fn create_workspace(
+    State(state): State<AppState>,
+    RequireAuth(user): RequireAuth,
+    Path(org_id): Path<String>,
+    Json(req): Json<CreateWorkspaceRequest>,
+) -> Result<Json<WorkspaceResponse>, ApiError> {
+    let org_id = Uuid::parse_str(&org_id).map_err(|_| ApiError::NotFound)?;
+    let org_id = OrgId::from_uuid(org_id);
+    let svc = org_service(&state);
+    let slug = req.slug.as_deref();
+    let ws = svc.create_workspace(org_id, user.id, &req.name, slug).await?;
+    Ok(Json(workspace_to_response(&ws)))
+}
+
+/// Build the org router.
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route("/", get(list_orgs).post(create_org))
+        .route("/{org_id}", get(get_org))
+        .route("/{org_id}/members", get(list_members))
+        .route("/{org_id}/invites", post(create_invite))
+        .route("/{org_id}/workspaces", get(list_workspaces).post(create_workspace))
+}
+
+/// Router for invite-only routes (e.g. /v1/invites/accept).
+pub fn invite_router() -> Router<AppState> {
+    Router::new().route("/accept", post(accept_invite))
+}

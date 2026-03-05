@@ -12,7 +12,7 @@ Production-ready backend checklist for an Axum + PostgreSQL SaaS stack.
 
 - [x] Clear module boundaries: `routes/`, `auth/`, `services/`, `repositories/` (in auth)
 - [x] Feature-based or domain-based layout (e.g. `auth/`, `billing/`, `storage/`)
-- [ ] Shared types and errors in a central place; avoid circular deps
+- [x] Shared types and errors in a central place; avoid circular deps
 
 ### Layering
 
@@ -127,7 +127,7 @@ Three login methods: **email code**, **Google**, and **email + password**.
   - JWT: stateless, `Authorization: Bearer`
   - Sessions: `axum-extra::CookieSession` or Redis-backed
 - [ ] Token refresh flow (if JWT)
-- [ ] Secure, httpOnly, SameSite cookies if cookie-based
+- [x] Secure, httpOnly, SameSite cookies if cookie-based
 - [x] Rate limiting on login and “send code” endpoints
 
 ---
@@ -142,21 +142,21 @@ Three login methods: **email code**, **Google**, and **email + password**.
 - [x] `permissions` table (e.g. `users:read`, `users:write`, `billing:manage`)
 - [x] `role_permissions` junction (many-to-many: role ↔ permission)
 - [x] `user_roles` (user ↔ role; support multiple roles per user)
-- [ ] Permission naming convention (e.g. `resource:action`)
+- [x] Permission naming convention (e.g. `resource:action`)
 
 ### Enforcement
 
 - [x] Auth extractor: `RequireAuth` (checks Bearer token, returns user)
 - [x] Helpers: `check_permission`, `check_role` (via RbacRepository)
-- [ ] Apply per-route or per-router via `.route_layer()` (helpers exist; layer not applied)
+- [x] Apply per-route or per-router via `.route_layer()` (RequireBillingManage, RequireFilesRead, RequireFilesWrite)
 - [x] 401 Unauthorized when not authenticated (`RequireAuth`, `verify_token`)
 - [x] 403 Forbidden when authenticated but lacking permission (`check_permission`, `check_role`)
 
 ### Resource-Level Authorization
 
 - [x] Ownership checks: user can only access their own resources (billing transactions, portal scoped to user)
-- [ ] Multi-tenancy: org/workspace/tenant scoping (e.g. `tenant_id` on resources)
-- [ ] Row-level checks in queries (filter by `user_id` / `tenant_id`)
+- [x] Multi-tenancy: org/workspace model (`orgs`, `workspaces`, `org_members`, `org_invites`); billing org-scoped, files workspace-scoped
+- [x] Row-level checks in queries (filter by `org_id` / `workspace_id`; `ensure_user_in_org`, `ensure_workspace_access`, `RequireOrgMember`, `RequireWorkspaceMember`)
 
 ### API Keys & Service Accounts
 
@@ -195,7 +195,7 @@ Three login methods: **email code**, **Google**, and **email + password**.
 ### Subscriptions
 
 - [x] Plan models: `subscription_plans` (id, name, stripe_price_id, interval, amount, features)
-- [x] `subscriptions` table (user_id, plan_id, stripe_subscription_id, status, current_period_end)
+- [x] `subscriptions` table (user_id, org_id, plan_id, stripe_subscription_id, status, current_period_end)
 - [x] Create Checkout Session for subscription signup
 - [x] Webhook handlers: `checkout.session.completed` (subscription + payment); `customer.subscription.updated` / `deleted` (stubs)
 - [x] Sync subscription status to DB on webhook events (checkout.session.completed; subscription.updated/deleted stubbed)
@@ -208,7 +208,7 @@ Three login methods: **email code**, **Google**, and **email + password**.
 - [x] Create Checkout Session for one-time purchase
 - [x] Webhook: `checkout.session.completed` (payment mode)
 - [x] Credit tokens to user on successful payment
-- [x] `user_credits` + `credit_transactions` with audit trail
+- [x] `org_credits` + `credit_transactions` (org-scoped) with audit trail
 
 ### Webhooks
 
@@ -221,7 +221,7 @@ Three login methods: **email code**, **Google**, and **email + password**.
 ### Checkout & customer portal
 
 - [x] Redirect to Stripe Checkout with `success_url`, `cancel_url`, `client_reference_id` (user_id)
-- [x] Customer portal link (`GET /v1/billing/portal`) for managing subscription, payment methods
+- [x] Customer portal link (`GET /v1/orgs/:org_id/billing/portal`) for managing subscription, payment methods
 - [x] Store `stripe_customer_id` on user for portal / future payments
 
 ### Edge cases

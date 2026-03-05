@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::types::UserId;
+use crate::common::{OrgId, UserId};
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct SubscriptionPlan {
@@ -24,6 +24,7 @@ pub struct SubscriptionPlan {
 pub struct Subscription {
     pub id: Uuid,
     pub user_id: UserId,
+    pub org_id: Option<OrgId>,
     pub stripe_customer_id: String,
     pub stripe_subscription_id: String,
     pub plan_id: Option<Uuid>,
@@ -37,6 +38,7 @@ pub struct Subscription {
 pub struct SubscriptionTransaction {
     pub id: Uuid,
     pub user_id: UserId,
+    pub org_id: Option<OrgId>,
     pub subscription_id: Uuid,
     pub event_type: String,
     pub stripe_invoice_id: Option<String>,
@@ -62,6 +64,7 @@ pub struct TokenPackage {
 pub struct CreditTransaction {
     pub id: Uuid,
     pub user_id: UserId,
+    pub org_id: Option<OrgId>,
     pub package_id: Option<Uuid>,
     pub amount_tokens: i64,
     pub amount_cents: i64,
@@ -170,6 +173,7 @@ impl BillingRepository {
     pub async fn create_subscription(
         &self,
         user_id: UserId,
+        org_id: OrgId,
         stripe_customer_id: &str,
         stripe_subscription_id: &str,
         plan_id: Option<Uuid>,
@@ -181,15 +185,16 @@ impl BillingRepository {
         let now = Utc::now();
         let row = sqlx::query(
             r#"
-            INSERT INTO subscriptions (id, user_id, stripe_customer_id, stripe_subscription_id, plan_id, status,
+            INSERT INTO subscriptions (id, user_id, org_id, stripe_customer_id, stripe_subscription_id, plan_id, status,
                 current_period_start, current_period_end, cancel_at_period_end, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, false, $9, $9)
-            RETURNING id, user_id, stripe_customer_id, stripe_subscription_id, plan_id, status,
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false, $10, $10)
+            RETURNING id, user_id, org_id, stripe_customer_id, stripe_subscription_id, plan_id, status,
                 current_period_start, current_period_end, cancel_at_period_end
             "#,
         )
         .bind(id)
         .bind(user_id.0)
+        .bind(org_id.0)
         .bind(stripe_customer_id)
         .bind(stripe_subscription_id)
         .bind(plan_id)
@@ -202,6 +207,7 @@ impl BillingRepository {
         Ok(Subscription {
             id: row.get("id"),
             user_id: UserId(row.get("user_id")),
+            org_id: row.get::<Option<Uuid>, _>("org_id").map(OrgId::from_uuid),
             stripe_customer_id: row.get("stripe_customer_id"),
             stripe_subscription_id: row.get("stripe_subscription_id"),
             plan_id: row.get("plan_id"),
@@ -214,7 +220,7 @@ impl BillingRepository {
 
     pub async fn get_subscription_by_stripe_id(&self, stripe_subscription_id: &str) -> Result<Option<Subscription>> {
         let row = sqlx::query(
-            "SELECT id, user_id, stripe_customer_id, stripe_subscription_id, plan_id, status,
+            "SELECT id, user_id, org_id, stripe_customer_id, stripe_subscription_id, plan_id, status,
                     current_period_start, current_period_end, cancel_at_period_end
              FROM subscriptions WHERE stripe_subscription_id = $1",
         )
@@ -224,6 +230,7 @@ impl BillingRepository {
         Ok(row.map(|r: sqlx::postgres::PgRow| Subscription {
             id: r.get("id"),
             user_id: UserId(r.get("user_id")),
+            org_id: r.get::<Option<Uuid>, _>("org_id").map(OrgId::from_uuid),
             stripe_customer_id: r.get("stripe_customer_id"),
             stripe_subscription_id: r.get("stripe_subscription_id"),
             plan_id: r.get("plan_id"),
@@ -261,6 +268,7 @@ impl BillingRepository {
     pub async fn add_subscription_transaction(
         &self,
         user_id: UserId,
+        org_id: Option<OrgId>,
         subscription_id: Uuid,
         event_type: &str,
         stripe_invoice_id: Option<&str>,
@@ -271,11 +279,12 @@ impl BillingRepository {
         let id = Uuid::now_v7();
         let now = Utc::now();
         sqlx::query(
-            "INSERT INTO subscription_transactions (id, user_id, subscription_id, event_type, stripe_invoice_id,
-             amount_cents, currency, receipt_url, occurred_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            "INSERT INTO subscription_transactions (id, user_id, org_id, subscription_id, event_type, stripe_invoice_id,
+             amount_cents, currency, receipt_url, occurred_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
         )
         .bind(id)
         .bind(user_id.0)
+        .bind(org_id.map(|o| o.0))
         .bind(subscription_id)
         .bind(event_type)
         .bind(stripe_invoice_id)
@@ -291,6 +300,7 @@ impl BillingRepository {
     pub async fn add_credit_transaction(
         &self,
         user_id: UserId,
+        org_id: OrgId,
         package_id: Option<Uuid>,
         amount_tokens: i64,
         amount_cents: i64,
@@ -303,11 +313,12 @@ impl BillingRepository {
         let id = Uuid::now_v7();
         let now = Utc::now();
         sqlx::query(
-            "INSERT INTO credit_transactions (id, user_id, package_id, amount_tokens, amount_cents, currency, kind,
-             stripe_payment_intent_id, stripe_charge_id, receipt_url, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
+            "INSERT INTO credit_transactions (id, user_id, org_id, package_id, amount_tokens, amount_cents, currency, kind,
+             stripe_payment_intent_id, stripe_charge_id, receipt_url, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"
         )
         .bind(id)
         .bind(user_id.0)
+        .bind(org_id.0)
         .bind(package_id)
         .bind(amount_tokens)
         .bind(amount_cents)
@@ -338,9 +349,25 @@ impl BillingRepository {
         Ok(())
     }
 
+    pub async fn upsert_org_credits(&self, org_id: OrgId, delta: i64) -> Result<()> {
+        let now = Utc::now();
+        sqlx::query(
+            r#"
+            INSERT INTO org_credits (org_id, balance, updated_at) VALUES ($1, $2, $3)
+            ON CONFLICT (org_id) DO UPDATE SET balance = org_credits.balance + $2, updated_at = $3
+            "#,
+        )
+        .bind(org_id.0)
+        .bind(delta)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn list_subscription_transactions(&self, user_id: UserId) -> Result<Vec<SubscriptionTransaction>> {
         let rows = sqlx::query(
-            "SELECT id, user_id, subscription_id, event_type, stripe_invoice_id, amount_cents, currency, receipt_url, occurred_at
+            "SELECT id, user_id, org_id, subscription_id, event_type, stripe_invoice_id, amount_cents, currency, receipt_url, occurred_at
              FROM subscription_transactions WHERE user_id = $1 ORDER BY occurred_at DESC",
         )
         .bind(user_id.0)
@@ -351,6 +378,32 @@ impl BillingRepository {
             .map(|r: sqlx::postgres::PgRow| SubscriptionTransaction {
                 id: r.get("id"),
                 user_id: UserId(r.get("user_id")),
+                org_id: r.get::<Option<Uuid>, _>("org_id").map(OrgId::from_uuid),
+                subscription_id: r.get("subscription_id"),
+                event_type: r.get("event_type"),
+                stripe_invoice_id: r.get("stripe_invoice_id"),
+                amount_cents: r.get("amount_cents"),
+                currency: r.get("currency"),
+                receipt_url: r.get("receipt_url"),
+                occurred_at: r.get("occurred_at"),
+            })
+            .collect())
+    }
+
+    pub async fn list_subscription_transactions_by_org(&self, org_id: OrgId) -> Result<Vec<SubscriptionTransaction>> {
+        let rows = sqlx::query(
+            "SELECT id, user_id, org_id, subscription_id, event_type, stripe_invoice_id, amount_cents, currency, receipt_url, occurred_at
+             FROM subscription_transactions WHERE org_id = $1 ORDER BY occurred_at DESC",
+        )
+        .bind(org_id.0)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r: sqlx::postgres::PgRow| SubscriptionTransaction {
+                id: r.get("id"),
+                user_id: UserId(r.get("user_id")),
+                org_id: r.get::<Option<Uuid>, _>("org_id").map(OrgId::from_uuid),
                 subscription_id: r.get("subscription_id"),
                 event_type: r.get("event_type"),
                 stripe_invoice_id: r.get("stripe_invoice_id"),
@@ -364,7 +417,7 @@ impl BillingRepository {
 
     pub async fn list_credit_transactions(&self, user_id: UserId) -> Result<Vec<CreditTransaction>> {
         let rows = sqlx::query(
-            "SELECT id, user_id, package_id, amount_tokens, amount_cents, currency, kind, receipt_url, created_at
+            "SELECT id, user_id, org_id, package_id, amount_tokens, amount_cents, currency, kind, receipt_url, created_at
              FROM credit_transactions WHERE user_id = $1 ORDER BY created_at DESC",
         )
         .bind(user_id.0)
@@ -375,6 +428,32 @@ impl BillingRepository {
             .map(|r: sqlx::postgres::PgRow| CreditTransaction {
                 id: r.get("id"),
                 user_id: UserId(r.get("user_id")),
+                org_id: r.get::<Option<Uuid>, _>("org_id").map(OrgId::from_uuid),
+                package_id: r.get("package_id"),
+                amount_tokens: r.get("amount_tokens"),
+                amount_cents: r.get("amount_cents"),
+                currency: r.get("currency"),
+                kind: r.get("kind"),
+                receipt_url: r.get("receipt_url"),
+                created_at: r.get("created_at"),
+            })
+            .collect())
+    }
+
+    pub async fn list_credit_transactions_by_org(&self, org_id: OrgId) -> Result<Vec<CreditTransaction>> {
+        let rows = sqlx::query(
+            "SELECT id, user_id, org_id, package_id, amount_tokens, amount_cents, currency, kind, receipt_url, created_at
+             FROM credit_transactions WHERE org_id = $1 ORDER BY created_at DESC",
+        )
+        .bind(org_id.0)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r: sqlx::postgres::PgRow| CreditTransaction {
+                id: r.get("id"),
+                user_id: UserId(r.get("user_id")),
+                org_id: r.get::<Option<Uuid>, _>("org_id").map(OrgId::from_uuid),
                 package_id: r.get("package_id"),
                 amount_tokens: r.get("amount_tokens"),
                 amount_cents: r.get("amount_cents"),

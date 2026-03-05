@@ -6,9 +6,9 @@ pub mod v1;
 use crate::AppState;
 
 /// Root router: /health (probes), /v1/*, /webhooks/*, /swagger-ui.
-pub fn router() -> Router<AppState> {
+pub fn router(state: &AppState) -> Router<AppState> {
     Router::new()
         .route("/health", get(health_check::health_check))
-        .nest("/v1", v1::router())
+        .nest("/v1", v1::router(state))
         .nest("/webhooks", crate::billing::routes::router())
 }

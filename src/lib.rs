@@ -2,17 +2,17 @@ use axum::Router;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-pub mod api_error;
 pub mod auth;
 pub mod billing;
+pub mod common;
 pub mod cfg;
-pub mod services;
 pub mod db;
 pub mod middleware;
+pub mod org;
 pub mod routes;
+pub mod services;
 pub mod storage;
 pub mod telemetry;
-pub mod types;
 
 pub use cfg::*;
 pub use db::*;
@@ -40,10 +40,15 @@ pub use db::*;
         billing::routes::checkout,
         billing::routes::portal,
         billing::routes::transactions,
+        auth::rbac_routes::list_roles,
+        auth::rbac_routes::list_permissions,
+        auth::rbac_routes::list_user_roles,
+        auth::rbac_routes::assign_role,
+        auth::rbac_routes::revoke_role,
     ),
     components(
         schemas(
-            api_error::ApiErrorResp,
+            common::ApiErrorResp,
             auth::routes::SendCodeRequest,
             auth::routes::VerifyCodeRequest,
             auth::routes::RegisterRequest,
@@ -55,11 +60,19 @@ pub use db::*;
             storage::routes::PresignedUrlResponse,
             billing::routes::CheckoutRequest,
             billing::routes::UrlResponse,
+            auth::rbac_routes::RoleResponse,
+            auth::rbac_routes::PermissionResponse,
+            auth::rbac_routes::AssignRoleRequest,
         )
     ),
     modifiers(&SecurityAddon)
 )]
 struct ApiDoc;
+
+/// Returns the OpenAPI spec (e.g. for static generation or export).
+pub fn openapi_spec() -> utoipa::openapi::OpenApi {
+    ApiDoc::openapi()
+}
 
 struct SecurityAddon;
 
@@ -154,7 +167,7 @@ pub fn router(cfg: Config, db: Db, storage_service: Option<StorageService>) -> R
     let is_production = matches!(app_state.cfg.env, cfg::Environment::Production);
 
     // Create the router with the routes.
-    let router = routes::router();
+    let router = routes::router(&app_state);
 
     // Combine all the routes and apply the middleware layers.
     // The order of the layers is important. The first layer is the outermost layer.

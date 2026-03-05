@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::types::UserId;
+use crate::common::UserId;
 
 #[derive(Clone, Debug)]
 pub struct User {
@@ -225,18 +225,76 @@ impl RbacRepository {
             .collect())
     }
 
-    /// Assigns a role to a user.
+    /// Assigns a role to a user. Returns error if role does not exist.
     pub async fn assign_role(&self, user_id: UserId, role_name: &str) -> Result<()> {
         let role_id: Uuid = sqlx::query_scalar("SELECT id FROM roles WHERE name = $1")
             .bind(role_name)
-            .fetch_one(&self.pool)
-            .await?;
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Role '{}' not found", role_name))?;
         sqlx::query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT (user_id, role_id) DO NOTHING")
             .bind(user_id.0)
             .bind(role_id)
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// Revokes a role from a user. Returns true if a row was deleted.
+    pub async fn revoke_role(&self, user_id: UserId, role_name: &str) -> Result<bool> {
+        let role_id: Option<Uuid> =
+            sqlx::query_scalar("SELECT id FROM roles WHERE name = $1")
+                .bind(role_name)
+                .fetch_optional(&self.pool)
+                .await?;
+        let Some(role_id) = role_id else {
+            return Ok(false);
+        };
+        let result = sqlx::query("DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2")
+            .bind(user_id.0)
+            .bind(role_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Lists all roles (id, name).
+    pub async fn list_roles(&self) -> Result<Vec<(Uuid, String)>> {
+        let rows = sqlx::query("SELECT id, name FROM roles ORDER BY name")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r: sqlx::postgres::PgRow| (r.get("id"), r.get("name")))
+            .collect())
+    }
+
+    /// Lists all permissions (id, name).
+    pub async fn list_permissions(&self) -> Result<Vec<(Uuid, String)>> {
+        let rows = sqlx::query("SELECT id, name FROM permissions ORDER BY name")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r: sqlx::postgres::PgRow| (r.get("id"), r.get("name")))
+            .collect())
+    }
+
+    /// Returns permission names for a role.
+    pub async fn get_role_permissions(&self, role_name: &str) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT p.name FROM permissions p
+             JOIN role_permissions rp ON rp.permission_id = p.id
+             JOIN roles r ON r.id = rp.role_id
+             WHERE r.name = $1",
+        )
+        .bind(role_name)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r: sqlx::postgres::PgRow| r.get::<String, _>("name"))
+            .collect())
     }
 }
 
