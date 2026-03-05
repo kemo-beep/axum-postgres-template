@@ -1,4 +1,8 @@
-use axum::{body::Body, http::{Method, Request, Response, StatusCode}, Router};
+use axum::{
+    body::Body,
+    http::{Method, Request, Response, StatusCode},
+    Router,
+};
 use serde_json::Value;
 use sqlx::{Connection, Executor, PgConnection};
 use std::sync::Once;
@@ -37,6 +41,28 @@ impl TestApp {
         self.request(req).await
     }
 
+    /// POST with Authorization: Bearer {token} and optional JSON body.
+    pub async fn post_with_bearer(
+        &self,
+        path: &str,
+        token: &str,
+        body: Option<Value>,
+    ) -> Response<Body> {
+        let (body, content_type) = match body {
+            Some(b) => (Body::from(b.to_string()), Some("application/json")),
+            None => (Body::empty(), None),
+        };
+        let mut req = Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header("authorization", format!("Bearer {}", token));
+        if let Some(ct) = content_type {
+            req = req.header("content-type", ct);
+        }
+        let req = req.body(body).unwrap();
+        self.request(req).await
+    }
+
     /// Register and return access_token, or None if auth not configured.
     pub async fn get_token_via_register(&self, email: &str, password: &str) -> Option<String> {
         let resp = self
@@ -48,9 +74,13 @@ impl TestApp {
         if resp.status() == StatusCode::INTERNAL_SERVER_ERROR {
             return None;
         }
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.ok()?;
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .ok()?;
         let body: Value = serde_json::from_slice(&bytes).ok()?;
-        body.get("access_token").and_then(|v| v.as_str()).map(String::from)
+        body.get("access_token")
+            .and_then(|v| v.as_str())
+            .map(String::from)
     }
 
     /// Login and return access_token, or None if auth not configured.
@@ -64,9 +94,13 @@ impl TestApp {
         if resp.status() == StatusCode::INTERNAL_SERVER_ERROR {
             return None;
         }
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.ok()?;
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .ok()?;
         let body: Value = serde_json::from_slice(&bytes).ok()?;
-        body.get("access_token").and_then(|v| v.as_str()).map(String::from)
+        body.get("access_token")
+            .and_then(|v| v.as_str())
+            .map(String::from)
     }
 
     pub async fn new() -> Self {

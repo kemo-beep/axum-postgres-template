@@ -13,7 +13,10 @@ pub fn router(state: &AppState) -> Router<AppState> {
         .nest(
             "/orgs",
             crate::org::routes::router()
-                .nest("/{org_id}/billing", crate::billing::routes::org_billing_router(state))
+                .nest(
+                    "/{org_id}/billing",
+                    crate::billing::routes::org_billing_router(state),
+                )
                 .nest(
                     "/{org_id}/workspaces/{workspace_id}/files",
                     crate::storage::routes::workspace_files_router(state),

@@ -11,7 +11,6 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::auth::extractor::{RequireAuth, RequireUsersRead};
-use crate::auth::repository::RbacRepository;
 use crate::common::{ApiError, UserId};
 use crate::AppState;
 
@@ -50,11 +49,7 @@ pub async fn list_roles(
     State(state): State<AppState>,
     RequireAuth(_user): RequireAuth,
 ) -> Result<Json<Vec<RoleResponse>>, ApiError> {
-    let rbac = RbacRepository::new(state.db.pool.clone());
-    let roles = rbac
-        .list_roles()
-        .await
-        .map_err(|e| ApiError::InternalError(e.into()))?;
+    let roles = state.rbac_service.list_roles().await?;
     let resp: Vec<RoleResponse> = roles
         .into_iter()
         .map(|(id, name)| RoleResponse {
@@ -82,11 +77,7 @@ pub async fn list_permissions(
     State(state): State<AppState>,
     RequireAuth(_user): RequireAuth,
 ) -> Result<Json<Vec<PermissionResponse>>, ApiError> {
-    let rbac = RbacRepository::new(state.db.pool.clone());
-    let perms = rbac
-        .list_permissions()
-        .await
-        .map_err(|e| ApiError::InternalError(e.into()))?;
+    let perms = state.rbac_service.list_permissions().await?;
     let resp: Vec<PermissionResponse> = perms
         .into_iter()
         .map(|(id, name)| PermissionResponse {
@@ -120,20 +111,23 @@ pub async fn list_user_roles(
     let id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
     let user_id = UserId(id);
     if caller.id != user_id {
-        crate::auth::extractor::check_permission(&state, caller.id, crate::auth::permissions::USERS_READ)
-            .await?;
+        crate::auth::extractor::check_permission(
+            &state,
+            caller.id,
+            crate::auth::permissions::USERS_READ,
+        )
+        .await?;
     }
-    let auth = state.auth_service.as_ref().ok_or(ApiError::InternalError(
-        anyhow::anyhow!("Auth not configured"),
-    ))?;
+    let auth = state
+        .auth_service
+        .as_ref()
+        .ok_or(ApiError::InternalError(anyhow::anyhow!(
+            "Auth not configured"
+        )))?;
     if auth.get_user(user_id).await?.is_none() {
         return Err(ApiError::NotFound);
     }
-    let rbac = RbacRepository::new(state.db.pool.clone());
-    let roles = rbac
-        .get_user_roles(user_id)
-        .await
-        .map_err(|e| ApiError::InternalError(e.into()))?;
+    let roles = state.rbac_service.get_user_roles(user_id).await?;
     Ok(Json(roles))
 }
 
@@ -158,20 +152,24 @@ pub async fn assign_role(
     RequireAuth(caller): RequireAuth,
     Json(req): Json<AssignRoleRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    crate::auth::extractor::check_permission(&state, caller.id, crate::auth::permissions::USERS_WRITE)
-        .await?;
+    crate::auth::extractor::check_permission(
+        &state,
+        caller.id,
+        crate::auth::permissions::USERS_WRITE,
+    )
+    .await?;
     let id = Uuid::parse_str(&req.user_id).map_err(|_| ApiError::NotFound)?;
     let user_id = UserId(id);
-    let auth = state.auth_service.as_ref().ok_or(ApiError::InternalError(
-        anyhow::anyhow!("Auth not configured"),
-    ))?;
+    let auth = state
+        .auth_service
+        .as_ref()
+        .ok_or(ApiError::InternalError(anyhow::anyhow!(
+            "Auth not configured"
+        )))?;
     if auth.get_user(user_id).await?.is_none() {
         return Err(ApiError::NotFound);
     }
-    let rbac = RbacRepository::new(state.db.pool.clone());
-    rbac.assign_role(user_id, &req.role)
-        .await
-        .map_err(|e| ApiError::InternalError(e.into()))?;
+    state.rbac_service.assign_role(user_id, &req.role).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -195,37 +193,45 @@ pub async fn revoke_role(
     RequireAuth(caller): RequireAuth,
     Path((id, role)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    crate::auth::extractor::check_permission(&state, caller.id, crate::auth::permissions::USERS_WRITE)
-        .await?;
+    crate::auth::extractor::check_permission(
+        &state,
+        caller.id,
+        crate::auth::permissions::USERS_WRITE,
+    )
+    .await?;
     let id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
     let user_id = UserId(id);
-    let auth = state.auth_service.as_ref().ok_or(ApiError::InternalError(
-        anyhow::anyhow!("Auth not configured"),
-    ))?;
+    let auth = state
+        .auth_service
+        .as_ref()
+        .ok_or(ApiError::InternalError(anyhow::anyhow!(
+            "Auth not configured"
+        )))?;
     if auth.get_user(user_id).await?.is_none() {
         return Err(ApiError::NotFound);
     }
-    let rbac = RbacRepository::new(state.db.pool.clone());
-    let _removed = rbac
-        .revoke_role(user_id, &role)
-        .await
-        .map_err(|e| ApiError::InternalError(e.into()))?;
+    let _removed = state.rbac_service.revoke_role(user_id, &role).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 /// Builds the RBAC router. Requires state for permission layers.
 pub fn router(state: &AppState) -> Router<AppState> {
-    let read_protected = Router::new()
-        .route("/", get(list_roles))
-        .route_layer(from_extractor_with_state::<RequireUsersRead, _>(state.clone()));
-    let permissions_route = Router::new()
-        .route("/", get(list_permissions))
-        .route_layer(from_extractor_with_state::<RequireUsersRead, _>(state.clone()));
+    let read_protected =
+        Router::new()
+            .route("/", get(list_roles))
+            .route_layer(from_extractor_with_state::<RequireUsersRead, _>(
+                state.clone(),
+            ));
+    let permissions_route =
+        Router::new()
+            .route("/", get(list_permissions))
+            .route_layer(from_extractor_with_state::<RequireUsersRead, _>(
+                state.clone(),
+            ));
     let write_protected = Router::new()
         .route("/users/assign-role", post(assign_role))
         .route("/{id}/roles/{role}", delete(revoke_role));
-    let user_roles_get =
-        Router::new().route("/{id}/roles", get(list_user_roles));
+    let user_roles_get = Router::new().route("/{id}/roles", get(list_user_roles));
     // list_user_roles uses RequireAuth in handler; allows self or users:read
 
     Router::new()

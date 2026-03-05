@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::common::UserId;
 
+/// Domain type for a registered user. Maps from `users` table.
 #[derive(Clone, Debug)]
 pub struct User {
     pub id: UserId,
@@ -14,10 +15,13 @@ pub struct User {
     pub password_hash: Option<String>,
     pub google_sub: Option<String>,
     pub stripe_customer_id: Option<String>,
+    pub failed_login_attempts: i32,
+    pub locked_until: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
+/// Database access for the `users` table.
 #[derive(Clone)]
 pub struct UserRepository {
     pool: PgPool,
@@ -28,14 +32,19 @@ impl UserRepository {
         Self { pool }
     }
 
-    pub async fn create(&self, email: &str, password_hash: Option<&str>, google_sub: Option<&str>) -> Result<User> {
+    pub async fn create(
+        &self,
+        email: &str,
+        password_hash: Option<&str>,
+        google_sub: Option<&str>,
+    ) -> Result<User> {
         let id = Uuid::now_v7();
         let now = Utc::now();
         let row = sqlx::query(
             r#"
             INSERT INTO users (id, email, password_hash, google_sub, created_at, updated_at)
             VALUES ($1, $2, $3, $4, $5, $5)
-            RETURNING id, email, password_hash, google_sub, created_at, updated_at
+            RETURNING id, email, password_hash, google_sub, stripe_customer_id, failed_login_attempts, locked_until, created_at, updated_at
             "#,
         )
         .bind(id)
@@ -51,6 +60,8 @@ impl UserRepository {
             password_hash: row.get("password_hash"),
             google_sub: row.get("google_sub"),
             stripe_customer_id: row.get("stripe_customer_id"),
+            failed_login_attempts: row.get::<i32, _>("failed_login_attempts"),
+            locked_until: row.get("locked_until"),
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
         })
@@ -58,47 +69,49 @@ impl UserRepository {
 
     pub async fn get_by_id(&self, id: UserId) -> Result<Option<User>> {
         let row = sqlx::query(
-            "SELECT id, email, password_hash, google_sub, stripe_customer_id, created_at, updated_at FROM users WHERE id = $1",
+            "SELECT id, email, password_hash, google_sub, stripe_customer_id, failed_login_attempts, locked_until, created_at, updated_at FROM users WHERE id = $1",
         )
         .bind(id.0)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(match row {
-            Some(row) => Some(User {
-                id: UserId(row.get("id")),
-                email: row.get("email"),
-                password_hash: row.get("password_hash"),
-                google_sub: row.get("google_sub"),
-                stripe_customer_id: row.get("stripe_customer_id"),
-                created_at: row.get("created_at"),
-                updated_at: row.get("updated_at"),
-            }),
-            None => None,
-        })
+        Ok(row.map(|row| User {
+            id: UserId(row.get("id")),
+            email: row.get("email"),
+            password_hash: row.get("password_hash"),
+            google_sub: row.get("google_sub"),
+            stripe_customer_id: row.get("stripe_customer_id"),
+            failed_login_attempts: row.get::<i32, _>("failed_login_attempts"),
+            locked_until: row.get("locked_until"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        }))
     }
 
     pub async fn get_by_email(&self, email: &str) -> Result<Option<User>> {
         let row = sqlx::query(
-            "SELECT id, email, password_hash, google_sub, stripe_customer_id, created_at, updated_at FROM users WHERE email = $1",
+            "SELECT id, email, password_hash, google_sub, stripe_customer_id, failed_login_attempts, locked_until, created_at, updated_at FROM users WHERE email = $1",
         )
         .bind(email)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(match row {
-            Some(row) => Some(User {
-                id: UserId(row.get("id")),
-                email: row.get("email"),
-                password_hash: row.get("password_hash"),
-                google_sub: row.get("google_sub"),
-                stripe_customer_id: row.get("stripe_customer_id"),
-                created_at: row.get("created_at"),
-                updated_at: row.get("updated_at"),
-            }),
-            None => None,
-        })
+        Ok(row.map(|row| User {
+            id: UserId(row.get("id")),
+            email: row.get("email"),
+            password_hash: row.get("password_hash"),
+            google_sub: row.get("google_sub"),
+            stripe_customer_id: row.get("stripe_customer_id"),
+            failed_login_attempts: row.get::<i32, _>("failed_login_attempts"),
+            locked_until: row.get("locked_until"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        }))
     }
 
-    pub async fn update_stripe_customer_id(&self, user_id: UserId, stripe_customer_id: &str) -> Result<()> {
+    pub async fn update_stripe_customer_id(
+        &self,
+        user_id: UserId,
+        stripe_customer_id: &str,
+    ) -> Result<()> {
         let now = Utc::now();
         sqlx::query("UPDATE users SET stripe_customer_id = $1, updated_at = $2 WHERE id = $3")
             .bind(stripe_customer_id)
@@ -130,8 +143,48 @@ impl UserRepository {
             .await?;
         Ok(())
     }
+
+    /// Increments failed_login_attempts. If it reaches max_attempts, sets locked_until.
+    pub async fn increment_failed_login(
+        &self,
+        user_id: UserId,
+        max_attempts: u32,
+        locked_until: DateTime<Utc>,
+    ) -> Result<()> {
+        let now = Utc::now();
+        sqlx::query(
+            r#"
+            UPDATE users SET
+                failed_login_attempts = failed_login_attempts + 1,
+                locked_until = CASE WHEN failed_login_attempts + 1 >= $1::int THEN $2 ELSE locked_until END,
+                updated_at = $3
+            WHERE id = $4
+            "#,
+        )
+        .bind(i64::from(max_attempts))
+        .bind(locked_until)
+        .bind(now)
+        .bind(user_id.0)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Resets failed attempts and lock after successful login.
+    pub async fn reset_failed_login(&self, user_id: UserId) -> Result<()> {
+        let now = Utc::now();
+        sqlx::query(
+            "UPDATE users SET failed_login_attempts = 0, locked_until = NULL, updated_at = $1 WHERE id = $2",
+        )
+        .bind(now)
+        .bind(user_id.0)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
 }
 
+/// Database access for `email_login_codes` (magic link / login codes).
 #[derive(Clone)]
 pub struct EmailCodeRepository {
     pool: PgPool,
@@ -183,6 +236,7 @@ impl EmailCodeRepository {
 }
 
 #[derive(Clone)]
+/// Database access for roles, permissions, and user-role assignments.
 pub struct RbacRepository {
     pool: PgPool,
 }
@@ -242,11 +296,10 @@ impl RbacRepository {
 
     /// Revokes a role from a user. Returns true if a row was deleted.
     pub async fn revoke_role(&self, user_id: UserId, role_name: &str) -> Result<bool> {
-        let role_id: Option<Uuid> =
-            sqlx::query_scalar("SELECT id FROM roles WHERE name = $1")
-                .bind(role_name)
-                .fetch_optional(&self.pool)
-                .await?;
+        let role_id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM roles WHERE name = $1")
+            .bind(role_name)
+            .fetch_optional(&self.pool)
+            .await?;
         let Some(role_id) = role_id else {
             return Ok(false);
         };
@@ -299,6 +352,7 @@ impl RbacRepository {
 }
 
 #[derive(Clone)]
+/// Database access for `password_reset_tokens` table.
 pub struct PasswordResetRepository {
     pool: PgPool,
 }
@@ -308,7 +362,12 @@ impl PasswordResetRepository {
         Self { pool }
     }
 
-    pub async fn create(&self, user_id: UserId, token_hash: &str, expires_at: DateTime<Utc>) -> Result<Uuid> {
+    pub async fn create(
+        &self,
+        user_id: UserId,
+        token_hash: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<Uuid> {
         let id = Uuid::now_v7();
         sqlx::query(
             "INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, $4)",
@@ -346,6 +405,7 @@ impl PasswordResetRepository {
 }
 
 #[derive(Clone)]
+/// Database access for blacklisted JWT tokens (logout).
 pub struct TokenBlacklistRepository {
     pool: PgPool,
 }
@@ -365,10 +425,11 @@ impl TokenBlacklistRepository {
     }
 
     pub async fn is_blacklisted(&self, jti: Uuid) -> Result<bool> {
-        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM token_blacklist WHERE jti = $1)")
-            .bind(jti)
-            .fetch_one(&self.pool)
-            .await?;
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM token_blacklist WHERE jti = $1)")
+                .bind(jti)
+                .fetch_one(&self.pool)
+                .await?;
         Ok(exists)
     }
 }

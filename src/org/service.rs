@@ -4,9 +4,11 @@ use chrono::{Duration, Utc};
 use rand::Rng;
 
 use crate::auth::repository::UserRepository;
-use crate::common::{ApiError, OrgId, UserId};
-use crate::org::repository::OrgRepository;
+use crate::common::{ApiError, OrgId, UserId, WorkspaceId};
+use crate::org::repository::{OrgMember, OrgRepository};
 
+/// Business logic for orgs, workspaces, and invites. Validates slugs and access.
+#[derive(Clone)]
 pub struct OrgService {
     repo: OrgRepository,
     user_repo: UserRepository,
@@ -23,34 +25,45 @@ impl OrgService {
         name: &str,
         slug: Option<&str>,
     ) -> Result<crate::org::repository::Org, ApiError> {
-        let slug = slug
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| slugify(name));
+        let slug = slug.map(|s| s.to_string()).unwrap_or_else(|| slugify(name));
         if slug.is_empty() {
             return Err(ApiError::InvalidRequest("Invalid org name".into()));
         }
-        if self.repo.get_org_by_slug(&slug).await.map_err(|e| ApiError::InternalError(e.into()))?.is_some() {
+        if self
+            .repo
+            .get_org_by_slug(&slug)
+            .await
+            .map_err(ApiError::InternalError)?
+            .is_some()
+        {
             return Err(ApiError::Conflict("Org slug already exists".into()));
         }
         self.repo
             .create_org(user_id, name, &slug)
             .await
-            .map_err(|e| ApiError::InternalError(e.into()))
+            .map_err(ApiError::InternalError)
     }
 
-    pub async fn get_user_orgs(&self, user_id: UserId) -> Result<Vec<crate::org::repository::Org>, ApiError> {
+    pub async fn get_user_orgs(
+        &self,
+        user_id: UserId,
+    ) -> Result<Vec<crate::org::repository::Org>, ApiError> {
         self.repo
             .get_user_orgs(user_id)
             .await
-            .map_err(|e| ApiError::InternalError(e.into()))
+            .map_err(ApiError::InternalError)
     }
 
-    pub async fn get_org(&self, org_id: OrgId, user_id: UserId) -> Result<crate::org::repository::Org, ApiError> {
+    pub async fn get_org(
+        &self,
+        org_id: OrgId,
+        user_id: UserId,
+    ) -> Result<crate::org::repository::Org, ApiError> {
         self.repo.ensure_user_in_org(user_id, org_id).await?;
         self.repo
             .get_org(org_id)
             .await
-            .map_err(|e| ApiError::InternalError(e.into()))?
+            .map_err(ApiError::InternalError)?
             .ok_or(ApiError::NotFound)
     }
 
@@ -62,16 +75,14 @@ impl OrgService {
         slug: Option<&str>,
     ) -> Result<crate::org::repository::Workspace, ApiError> {
         self.repo.ensure_user_in_org(user_id, org_id).await?;
-        let slug = slug
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| slugify(name));
+        let slug = slug.map(|s| s.to_string()).unwrap_or_else(|| slugify(name));
         if slug.is_empty() {
             return Err(ApiError::InvalidRequest("Invalid workspace name".into()));
         }
         self.repo
             .create_workspace(org_id, name, &slug)
             .await
-            .map_err(|e| ApiError::InternalError(e.into()))
+            .map_err(ApiError::InternalError)
     }
 
     pub async fn list_workspaces(
@@ -83,7 +94,33 @@ impl OrgService {
         self.repo
             .list_workspaces(org_id)
             .await
-            .map_err(|e| ApiError::InternalError(e.into()))
+            .map_err(ApiError::InternalError)
+    }
+
+    pub async fn list_members(
+        &self,
+        org_id: OrgId,
+        user_id: UserId,
+    ) -> Result<Vec<OrgMember>, ApiError> {
+        self.repo.ensure_user_in_org(user_id, org_id).await?;
+        self.repo
+            .get_org_members(org_id)
+            .await
+            .map_err(ApiError::InternalError)
+    }
+
+    pub async fn ensure_user_in_org(&self, user_id: UserId, org_id: OrgId) -> Result<(), ApiError> {
+        self.repo.ensure_user_in_org(user_id, org_id).await
+    }
+
+    pub async fn ensure_workspace_access(
+        &self,
+        user_id: UserId,
+        workspace_id: WorkspaceId,
+    ) -> Result<(), ApiError> {
+        self.repo
+            .ensure_workspace_access(user_id, workspace_id)
+            .await
     }
 
     pub async fn create_invite(
@@ -94,14 +131,16 @@ impl OrgService {
         role: &str,
     ) -> Result<String, ApiError> {
         if role != "admin" && role != "member" {
-            return Err(ApiError::InvalidRequest("Role must be admin or member".into()));
+            return Err(ApiError::InvalidRequest(
+                "Role must be admin or member".into(),
+            ));
         }
         self.repo.ensure_user_in_org(inviter_id, org_id).await?;
         let member_role = self
             .repo
             .get_member_role(org_id, inviter_id)
             .await
-            .map_err(|e| ApiError::InternalError(e.into()))?
+            .map_err(ApiError::InternalError)?
             .ok_or(ApiError::NotFound)?;
         if member_role != "owner" && member_role != "admin" {
             return Err(ApiError::Forbidden);
@@ -111,7 +150,7 @@ impl OrgService {
         self.repo
             .create_invite(org_id, email, role, inviter_id, &token, expires_at)
             .await
-            .map_err(|e| ApiError::InternalError(e.into()))?;
+            .map_err(ApiError::InternalError)?;
         Ok(token)
     }
 
@@ -120,25 +159,27 @@ impl OrgService {
             .repo
             .find_invite_by_token(token)
             .await
-            .map_err(|e| ApiError::InternalError(e.into()))?
+            .map_err(ApiError::InternalError)?
             .ok_or(ApiError::InvalidRequest("Invalid or expired invite".into()))?;
         let user = self
             .user_repo
             .get_by_id(user_id)
             .await
-            .map_err(|e| ApiError::InternalError(e.into()))?
+            .map_err(ApiError::InternalError)?
             .ok_or(ApiError::NotFound)?;
         if !user.email.eq_ignore_ascii_case(&invite.email) {
-            return Err(ApiError::InvalidRequest("Invite email does not match your account".into()));
+            return Err(ApiError::InvalidRequest(
+                "Invite email does not match your account".into(),
+            ));
         }
         self.repo
             .add_member(invite.org_id, user_id, &invite.role)
             .await
-            .map_err(|e| ApiError::InternalError(e.into()))?;
+            .map_err(ApiError::InternalError)?;
         self.repo
             .delete_invite(invite.id)
             .await
-            .map_err(|e| ApiError::InternalError(e.into()))?;
+            .map_err(ApiError::InternalError)?;
         Ok(())
     }
 }
@@ -146,7 +187,13 @@ impl OrgService {
 fn slugify(s: &str) -> String {
     s.to_lowercase()
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect::<String>()
         .split('-')
         .filter(|p| !p.is_empty())

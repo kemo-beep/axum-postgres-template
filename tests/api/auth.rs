@@ -24,7 +24,9 @@ async fn test_send_code_valid_email() {
         return; // Auth not configured
     }
     assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(body.get("ok"), Some(&json!(true)));
 }
@@ -102,9 +104,18 @@ async fn test_send_code_rate_limit() {
             return;
         }
         if i < 5 {
-            assert_eq!(resp.status(), StatusCode::OK, "request {} should succeed", i + 1);
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "request {} should succeed",
+                i + 1
+            );
         } else {
-            assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS, "6th request should be 429");
+            assert_eq!(
+                resp.status(),
+                StatusCode::TOO_MANY_REQUESTS,
+                "6th request should be 429"
+            );
         }
     }
 }
@@ -130,7 +141,10 @@ async fn test_verify_code_valid_new_user() {
     let app = TestApp::new().await;
 
     let resp = app
-        .post_json("/v1/auth/send-code", json!({ "email": "newcode@example.com" }))
+        .post_json(
+            "/v1/auth/send-code",
+            json!({ "email": "newcode@example.com" }),
+        )
         .await;
     if resp.status() == StatusCode::INTERNAL_SERVER_ERROR {
         return;
@@ -154,7 +168,9 @@ async fn test_verify_code_valid_new_user() {
         )
         .await;
     assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert!(body.get("access_token").is_some());
 }
@@ -163,11 +179,16 @@ async fn test_verify_code_valid_new_user() {
 async fn test_verify_code_valid_existing_user() {
     let app = TestApp::new().await;
 
-    let token = app.get_token_via_register("existcode@example.com", "secret123").await;
+    let token = app
+        .get_token_via_register("existcode@example.com", "secret123")
+        .await;
     let Some(_) = token else { return };
 
     let resp = app
-        .post_json("/v1/auth/send-code", json!({ "email": "existcode@example.com" }))
+        .post_json(
+            "/v1/auth/send-code",
+            json!({ "email": "existcode@example.com" }),
+        )
         .await;
     if resp.status() != StatusCode::OK {
         return;
@@ -197,7 +218,10 @@ async fn test_verify_code_invalid_code() {
     let app = TestApp::new().await;
 
     let resp = app
-        .post_json("/v1/auth/send-code", json!({ "email": "invcode@example.com" }))
+        .post_json(
+            "/v1/auth/send-code",
+            json!({ "email": "invcode@example.com" }),
+        )
         .await;
     if resp.status() == StatusCode::INTERNAL_SERVER_ERROR {
         return;
@@ -217,7 +241,10 @@ async fn test_verify_code_wrong_email() {
     let app = TestApp::new().await;
 
     let resp = app
-        .post_json("/v1/auth/send-code", json!({ "email": "right@example.com" }))
+        .post_json(
+            "/v1/auth/send-code",
+            json!({ "email": "right@example.com" }),
+        )
         .await;
     if resp.status() == StatusCode::INTERNAL_SERVER_ERROR {
         return;
@@ -274,7 +301,10 @@ async fn test_verify_code_already_used() {
     let app = TestApp::new().await;
 
     let resp = app
-        .post_json("/v1/auth/send-code", json!({ "email": "reuse@example.com" }))
+        .post_json(
+            "/v1/auth/send-code",
+            json!({ "email": "reuse@example.com" }),
+        )
         .await;
     if resp.status() == StatusCode::INTERNAL_SERVER_ERROR {
         return;
@@ -331,7 +361,9 @@ async fn test_verify_code_malformed_json() {
 async fn test_register_valid() {
     let app = TestApp::new().await;
 
-    let token = app.get_token_via_register("reg_valid@example.com", "password123").await;
+    let token = app
+        .get_token_via_register("reg_valid@example.com", "password123")
+        .await;
     if token.is_none() {
         return;
     }
@@ -367,7 +399,10 @@ async fn test_register_empty_email() {
     let app = TestApp::new().await;
 
     let resp = app
-        .post_json("/v1/auth/register", json!({ "email": "", "password": "secret123" }))
+        .post_json(
+            "/v1/auth/register",
+            json!({ "email": "", "password": "secret123" }),
+        )
         .await;
 
     if resp.status() == StatusCode::INTERNAL_SERVER_ERROR {
@@ -445,7 +480,12 @@ async fn test_register_rate_limit() {
             return;
         }
         if i < 5 {
-            assert_eq!(resp.status(), StatusCode::OK, "request {} should succeed", i + 1);
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "request {} should succeed",
+                i + 1
+            );
         } else {
             assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
         }
@@ -458,8 +498,12 @@ async fn test_register_rate_limit() {
 async fn test_login_valid() {
     let app = TestApp::new().await;
 
-    let _ = app.get_token_via_register("login_valid@example.com", "secret123").await;
-    let token = app.get_token_via_login("login_valid@example.com", "secret123").await;
+    let _ = app
+        .get_token_via_register("login_valid@example.com", "secret123")
+        .await;
+    let token = app
+        .get_token_via_login("login_valid@example.com", "secret123")
+        .await;
     if token.is_none() {
         return;
     }
@@ -487,7 +531,9 @@ async fn test_login_unknown_email() {
 async fn test_login_wrong_password() {
     let app = TestApp::new().await;
 
-    let _ = app.get_token_via_register("wrongpwd@example.com", "correct123").await;
+    let _ = app
+        .get_token_via_register("wrongpwd@example.com", "correct123")
+        .await;
     let resp = app
         .post_json(
             "/v1/auth/login",
@@ -506,7 +552,10 @@ async fn test_login_passwordless_user() {
     let app = TestApp::new().await;
 
     let resp1 = app
-        .post_json("/v1/auth/send-code", json!({ "email": "pwless@example.com" }))
+        .post_json(
+            "/v1/auth/send-code",
+            json!({ "email": "pwless@example.com" }),
+        )
         .await;
     if resp1.status() == StatusCode::INTERNAL_SERVER_ERROR {
         return;
@@ -558,7 +607,9 @@ async fn test_login_malformed_json() {
 async fn test_login_rate_limit() {
     let app = TestApp::new().await;
 
-    let _ = app.get_token_via_register("ratelogin@example.com", "secret123").await;
+    let _ = app
+        .get_token_via_register("ratelogin@example.com", "secret123")
+        .await;
     let body = json!({ "email": "ratelogin@example.com", "password": "secret123" });
     for i in 0..6 {
         let resp = app.post_json("/v1/auth/login", body.clone()).await;
@@ -566,7 +617,12 @@ async fn test_login_rate_limit() {
             return;
         }
         if i < 5 {
-            assert_eq!(resp.status(), StatusCode::OK, "request {} should succeed", i + 1);
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "request {} should succeed",
+                i + 1
+            );
         } else {
             assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
         }
@@ -579,15 +635,22 @@ async fn test_login_rate_limit() {
 async fn test_me_valid_token() {
     let app = TestApp::new().await;
 
-    let token = app.get_token_via_register("me_valid@example.com", "secret123").await;
+    let token = app
+        .get_token_via_register("me_valid@example.com", "secret123")
+        .await;
     let Some(tok) = token else { return };
 
     let resp = app.get_with_bearer("/v1/auth/me", &tok).await;
     assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert!(body.get("id").is_some());
-    assert_eq!(body.get("email").and_then(|v| v.as_str()), Some("me_valid@example.com"));
+    assert_eq!(
+        body.get("email").and_then(|v| v.as_str()),
+        Some("me_valid@example.com")
+    );
 }
 
 #[tokio::test]
@@ -639,7 +702,9 @@ async fn test_me_invalid_token() {
 async fn test_register_login_me_flow() {
     let app = TestApp::new().await;
 
-    let token = app.get_token_via_register("flow@example.com", "secret123").await;
+    let token = app
+        .get_token_via_register("flow@example.com", "secret123")
+        .await;
     if token.is_none() {
         return;
     }
@@ -648,9 +713,65 @@ async fn test_register_login_me_flow() {
     let resp = app.get_with_bearer("/v1/auth/me", &token).await;
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let login_token = app.get_token_via_login("flow@example.com", "secret123").await.unwrap();
+    let login_token = app
+        .get_token_via_login("flow@example.com", "secret123")
+        .await
+        .unwrap();
     let resp2 = app.get_with_bearer("/v1/auth/me", &login_token).await;
     assert_eq!(resp2.status(), StatusCode::OK);
+}
+
+// --- Token Refresh ---
+
+#[tokio::test]
+async fn test_refresh_valid_token() {
+    let app = TestApp::new().await;
+
+    let token = app
+        .get_token_via_register("refresh@example.com", "secret123")
+        .await;
+    if token.is_none() {
+        return;
+    }
+    let token = token.unwrap();
+
+    let resp = app.post_with_bearer("/v1/auth/refresh", &token, None).await;
+    if resp.status() == StatusCode::INTERNAL_SERVER_ERROR {
+        return;
+    }
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let new_token = body
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .expect("access_token in body");
+    assert_ne!(new_token, token, "refresh should return a new token");
+
+    let me_resp = app.get_with_bearer("/v1/auth/me", new_token).await;
+    assert_eq!(me_resp.status(), StatusCode::OK);
+
+    let old_me_resp = app.get_with_bearer("/v1/auth/me", &token).await;
+    assert_eq!(
+        old_me_resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "old token should be blacklisted"
+    );
+}
+
+#[tokio::test]
+async fn test_refresh_no_token() {
+    let app = TestApp::new().await;
+
+    let resp = app
+        .post_with_bearer("/v1/auth/refresh", "fake-token", None)
+        .await;
+    if resp.status() == StatusCode::INTERNAL_SERVER_ERROR {
+        return;
+    }
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
 // --- Google Redirect ---
@@ -680,11 +801,16 @@ async fn test_google_redirect() {
 async fn test_google_callback_missing_code() {
     let app = TestApp::new().await;
 
-    let req = Request::get("/v1/auth/google/callback").body(Body::empty()).unwrap();
+    let req = Request::get("/v1/auth/google/callback")
+        .body(Body::empty())
+        .unwrap();
     let resp = app.request(req).await;
 
     if resp.status() == StatusCode::INTERNAL_SERVER_ERROR {
         return;
     }
-    assert!(resp.status().is_client_error(), "missing code should be 4xx");
+    assert!(
+        resp.status().is_client_error(),
+        "missing code should be 4xx"
+    );
 }

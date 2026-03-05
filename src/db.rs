@@ -34,7 +34,10 @@ impl Db {
                         let delay_ms = RETRY_BASE_DELAY_MS * 2u64.pow(attempt - 1);
                         warn!(
                             "Database connection failed (attempt {}/{}), retrying in {}ms: {}",
-                            attempt, RETRY_ATTEMPTS, delay_ms, last_err.as_ref().unwrap()
+                            attempt,
+                            RETRY_ATTEMPTS,
+                            delay_ms,
+                            last_err.as_ref().unwrap()
                         );
                         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     }

@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::common::{ApiError, OrgId, UserId, WorkspaceId};
 
+/// Domain type for an organization. Maps from `orgs` table.
 #[derive(Clone, Debug)]
 pub struct Org {
     pub id: OrgId,
@@ -17,6 +18,7 @@ pub struct Org {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Domain type for a workspace within an org. Maps from `workspaces` table.
 #[derive(Clone, Debug)]
 pub struct Workspace {
     pub id: WorkspaceId,
@@ -27,6 +29,7 @@ pub struct Workspace {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Membership of a user in an org with a role. Maps from `org_members` table.
 #[derive(Clone, Debug)]
 pub struct OrgMember {
     pub org_id: OrgId,
@@ -35,6 +38,18 @@ pub struct OrgMember {
     pub created_at: DateTime<Utc>,
 }
 
+/// Org member with user email, for responses that need to show member details.
+/// Use `get_org_members_with_users` to fetch in a single JOIN query (avoids N+1).
+#[derive(Clone, Debug)]
+pub struct OrgMemberWithEmail {
+    pub org_id: OrgId,
+    pub user_id: UserId,
+    pub role: String,
+    pub email: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Database access for orgs, workspaces, org_members, and invites.
 #[derive(Clone)]
 pub struct OrgRepository {
     pool: PgPool,
@@ -62,13 +77,11 @@ impl OrgRepository {
         .fetch_one(&self.pool)
         .await?;
 
-        sqlx::query(
-            "INSERT INTO org_members (org_id, user_id, role) VALUES ($1, $2, 'owner')",
-        )
-        .bind(id)
-        .bind(user_id.0)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("INSERT INTO org_members (org_id, user_id, role) VALUES ($1, $2, 'owner')")
+            .bind(id)
+            .bind(user_id.0)
+            .execute(&self.pool)
+            .await?;
 
         Ok(Org {
             id: OrgId(row.get("id")),
@@ -80,12 +93,11 @@ impl OrgRepository {
     }
 
     pub async fn get_org(&self, id: OrgId) -> Result<Option<Org>> {
-        let row = sqlx::query(
-            "SELECT id, name, slug, created_at, updated_at FROM orgs WHERE id = $1",
-        )
-        .bind(id.0)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row =
+            sqlx::query("SELECT id, name, slug, created_at, updated_at FROM orgs WHERE id = $1")
+                .bind(id.0)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(row.map(|r| Org {
             id: OrgId(r.get("id")),
             name: r.get("name"),
@@ -96,12 +108,11 @@ impl OrgRepository {
     }
 
     pub async fn get_org_by_slug(&self, slug: &str) -> Result<Option<Org>> {
-        let row = sqlx::query(
-            "SELECT id, name, slug, created_at, updated_at FROM orgs WHERE slug = $1",
-        )
-        .bind(slug)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row =
+            sqlx::query("SELECT id, name, slug, created_at, updated_at FROM orgs WHERE slug = $1")
+                .bind(slug)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(row.map(|r| Org {
             id: OrgId(r.get("id")),
             name: r.get("name"),
@@ -124,13 +135,11 @@ impl OrgRepository {
     }
 
     pub async fn remove_member(&self, org_id: OrgId, user_id: UserId) -> Result<bool> {
-        let result = sqlx::query(
-            "DELETE FROM org_members WHERE org_id = $1 AND user_id = $2",
-        )
-        .bind(org_id.0)
-        .bind(user_id.0)
-        .execute(&self.pool)
-        .await?;
+        let result = sqlx::query("DELETE FROM org_members WHERE org_id = $1 AND user_id = $2")
+            .bind(org_id.0)
+            .bind(user_id.0)
+            .execute(&self.pool)
+            .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -177,6 +186,35 @@ impl OrgRepository {
             .collect())
     }
 
+    /// Returns org members with user email in a single query. Use when the API needs member details.
+    pub async fn get_org_members_with_users(
+        &self,
+        org_id: OrgId,
+    ) -> Result<Vec<OrgMemberWithEmail>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT om.org_id, om.user_id, om.role, om.created_at, u.email
+            FROM org_members om
+            JOIN users u ON u.id = om.user_id
+            WHERE om.org_id = $1
+            ORDER BY om.created_at
+            "#,
+        )
+        .bind(org_id.0)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| OrgMemberWithEmail {
+                org_id: OrgId(r.get("org_id")),
+                user_id: UserId(r.get("user_id")),
+                role: r.get("role"),
+                email: r.get("email"),
+                created_at: r.get("created_at"),
+            })
+            .collect())
+    }
+
     pub async fn get_member_role(&self, org_id: OrgId, user_id: UserId) -> Result<Option<String>> {
         let row = sqlx::query_scalar::<_, String>(
             "SELECT role FROM org_members WHERE org_id = $1 AND user_id = $2",
@@ -189,11 +227,7 @@ impl OrgRepository {
     }
 
     /// Ensures the user is a member of the org. Returns Ok(()) if yes, ApiError::NotFound otherwise.
-    pub async fn ensure_user_in_org(
-        &self,
-        user_id: UserId,
-        org_id: OrgId,
-    ) -> Result<(), ApiError> {
+    pub async fn ensure_user_in_org(&self, user_id: UserId, org_id: OrgId) -> Result<(), ApiError> {
         let exists = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM org_members WHERE org_id = $1 AND user_id = $2)",
         )
@@ -201,7 +235,7 @@ impl OrgRepository {
         .bind(user_id.0)
         .fetch_one(&self.pool)
         .await
-        .map_err(|e| ApiError::InternalError(e.into()))?;
+        .map_err(ApiError::DatabaseError)?;
         if exists {
             Ok(())
         } else {
@@ -209,7 +243,12 @@ impl OrgRepository {
         }
     }
 
-    pub async fn create_workspace(&self, org_id: OrgId, name: &str, slug: &str) -> Result<Workspace> {
+    pub async fn create_workspace(
+        &self,
+        org_id: OrgId,
+        name: &str,
+        slug: &str,
+    ) -> Result<Workspace> {
         let now = Utc::now();
         let id = Uuid::now_v7();
         let row = sqlx::query(
@@ -273,20 +312,32 @@ impl OrgRepository {
             .collect())
     }
 
-    /// Ensures the user can access the workspace (is org member; optionally workspace member).
-    /// For now: user must be org member (workspace inherits org access).
+    /// Ensures the user can access the workspace (is org member; workspace inherits org access).
+    /// Uses a single query to check workspace existence and org membership.
     pub async fn ensure_workspace_access(
         &self,
         user_id: UserId,
         workspace_id: WorkspaceId,
     ) -> Result<(), ApiError> {
-        let workspace = self
-            .get_workspace(workspace_id)
-            .await
-            .map_err(|e| ApiError::InternalError(e.into()))?
-            .ok_or(ApiError::NotFound)?;
-        self.ensure_user_in_org(user_id, workspace.org_id)
-            .await
+        let exists = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM workspaces w
+                JOIN org_members om ON om.org_id = w.org_id
+                WHERE w.id = $1 AND om.user_id = $2
+            )
+            "#,
+        )
+        .bind(workspace_id.0)
+        .bind(user_id.0)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+        if exists {
+            Ok(())
+        } else {
+            Err(ApiError::NotFound)
+        }
     }
 
     pub fn hash_invite_token(token: &str) -> String {

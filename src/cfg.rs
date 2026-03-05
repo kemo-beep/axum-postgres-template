@@ -75,6 +75,11 @@ pub struct Configuration {
 
     /// Auth cookie name for browser-based auth. Default "session".
     pub cookie_name: String,
+
+    /// Max failed password login attempts before lockout. 0 = disabled. Default 5.
+    pub login_lockout_max_attempts: u32,
+    /// Lockout duration in minutes. Default 15.
+    pub login_lockout_duration_minutes: u64,
 }
 
 #[derive(Deserialize, Debug, Clone, PartialEq)]
@@ -114,15 +119,13 @@ impl Configuration {
             env_var_opt("SMTP_PASSWORD"),
             env_var_opt("MAIL_FROM"),
         ) {
-            (Some(host), Some(port), Some(user), Some(password), Some(from)) => {
-                Some(SmtpConfig {
-                    host,
-                    port: port.parse().unwrap_or(587),
-                    user,
-                    password,
-                    from,
-                })
-            }
+            (Some(host), Some(port), Some(user), Some(password), Some(from)) => Some(SmtpConfig {
+                host,
+                port: port.parse().unwrap_or(587),
+                user,
+                password,
+                from,
+            }),
             _ => None,
         };
 
@@ -133,15 +136,19 @@ impl Configuration {
             env_var_opt("R2_BUCKET_NAME"),
             env_var_opt("R2_ENDPOINT"),
         ) {
-            (Some(account_id), Some(access_key_id), Some(secret_access_key), Some(bucket_name), Some(endpoint)) => {
-                Some(R2Config {
-                    account_id,
-                    access_key_id,
-                    secret_access_key,
-                    bucket_name,
-                    endpoint,
-                })
-            }
+            (
+                Some(account_id),
+                Some(access_key_id),
+                Some(secret_access_key),
+                Some(bucket_name),
+                Some(endpoint),
+            ) => Some(R2Config {
+                account_id,
+                access_key_id,
+                secret_access_key,
+                bucket_name,
+                endpoint,
+            }),
             _ => None,
         };
 
@@ -158,13 +165,26 @@ impl Configuration {
         };
 
         let cors_origins: Vec<String> = env_var_opt("CORS_ORIGINS")
-            .map(|s| s.split(',').map(str::trim).filter(|x| !x.is_empty()).map(String::from).collect())
+            .map(|s| {
+                s.split(',')
+                    .map(str::trim)
+                    .filter(|x| !x.is_empty())
+                    .map(String::from)
+                    .collect()
+            })
             .unwrap_or_else(|| vec!["*".to_string()]);
 
         let google_client_id = env_var_opt("GOOGLE_CLIENT_ID");
         let google_client_secret = env_var_opt("GOOGLE_CLIENT_SECRET");
-        let base_url = env_var_opt("BASE_URL").unwrap_or_else(|| format!("http://localhost:{}", app_port));
+        let base_url =
+            env_var_opt("BASE_URL").unwrap_or_else(|| format!("http://localhost:{}", app_port));
         let cookie_name = env_var_opt("COOKIE_NAME").unwrap_or_else(|| "session".to_string());
+        let login_lockout_max_attempts = env_var_opt("LOGIN_LOCKOUT_MAX_ATTEMPTS")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5);
+        let login_lockout_duration_minutes = env_var_opt("LOGIN_LOCKOUT_DURATION_MINUTES")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(15);
 
         Arc::new(Configuration {
             env,
@@ -182,6 +202,8 @@ impl Configuration {
             google_client_secret,
             base_url,
             cookie_name,
+            login_lockout_max_attempts,
+            login_lockout_duration_minutes,
         })
     }
 
@@ -206,6 +228,7 @@ impl FromStr for Environment {
     }
 }
 
+/// Reads a required env var. Panics with a clear message if missing.
 pub fn env_var(name: &str) -> String {
     std::env::var(name)
         .map_err(|e| format!("{}: {}", name, e))

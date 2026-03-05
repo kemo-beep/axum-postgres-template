@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::common::{OrgId, UserId};
 
+/// Subscription plan synced from Stripe. Maps from `subscription_plans` table.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct SubscriptionPlan {
     pub id: Uuid,
@@ -20,6 +21,7 @@ pub struct SubscriptionPlan {
     pub active: bool,
 }
 
+/// Active or past subscription. Maps from `subscriptions` table.
 #[derive(Clone, Debug)]
 pub struct Subscription {
     pub id: Uuid,
@@ -74,6 +76,7 @@ pub struct CreditTransaction {
     pub created_at: DateTime<Utc>,
 }
 
+/// Database access for plans, subscriptions, packages, and transactions.
 #[derive(Clone)]
 pub struct BillingRepository {
     pool: PgPool,
@@ -129,7 +132,10 @@ impl BillingRepository {
             .collect())
     }
 
-    pub async fn get_plan_by_stripe_price_id(&self, stripe_price_id: &str) -> Result<Option<SubscriptionPlan>> {
+    pub async fn get_plan_by_stripe_price_id(
+        &self,
+        stripe_price_id: &str,
+    ) -> Result<Option<SubscriptionPlan>> {
         let row = sqlx::query(
             "SELECT id, stripe_product_id, stripe_price_id, name, interval, amount_cents, currency, features, active
              FROM subscription_plans WHERE stripe_price_id = $1 AND active = true",
@@ -150,7 +156,10 @@ impl BillingRepository {
         }))
     }
 
-    pub async fn get_package_by_stripe_price_id(&self, stripe_price_id: &str) -> Result<Option<TokenPackage>> {
+    pub async fn get_package_by_stripe_price_id(
+        &self,
+        stripe_price_id: &str,
+    ) -> Result<Option<TokenPackage>> {
         let row = sqlx::query(
             "SELECT id, stripe_product_id, stripe_price_id, name, tokens, amount_cents, currency, active
              FROM token_packages WHERE stripe_price_id = $1 AND active = true",
@@ -170,6 +179,7 @@ impl BillingRepository {
         }))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_subscription(
         &self,
         user_id: UserId,
@@ -218,7 +228,50 @@ impl BillingRepository {
         })
     }
 
-    pub async fn get_subscription_by_stripe_id(&self, stripe_subscription_id: &str) -> Result<Option<Subscription>> {
+    pub async fn get_subscription_by_org(&self, org_id: OrgId) -> Result<Option<Subscription>> {
+        let row = sqlx::query(
+            "SELECT id, user_id, org_id, stripe_customer_id, stripe_subscription_id, plan_id, status,
+                    current_period_start, current_period_end, cancel_at_period_end
+             FROM subscriptions WHERE org_id = $1 AND status IN ('active', 'trialing', 'past_due', 'unpaid') ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(org_id.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r: sqlx::postgres::PgRow| Subscription {
+            id: r.get("id"),
+            user_id: UserId(r.get("user_id")),
+            org_id: r.get::<Option<Uuid>, _>("org_id").map(OrgId::from_uuid),
+            stripe_customer_id: r.get("stripe_customer_id"),
+            stripe_subscription_id: r.get("stripe_subscription_id"),
+            plan_id: r.get("plan_id"),
+            status: r.get("status"),
+            current_period_start: r.get("current_period_start"),
+            current_period_end: r.get("current_period_end"),
+            cancel_at_period_end: r.get("cancel_at_period_end"),
+        }))
+    }
+
+    pub async fn update_subscription_plan(
+        &self,
+        stripe_subscription_id: &str,
+        plan_id: Uuid,
+    ) -> Result<()> {
+        let now = Utc::now();
+        sqlx::query(
+            "UPDATE subscriptions SET plan_id = $1, updated_at = $2 WHERE stripe_subscription_id = $3",
+        )
+        .bind(plan_id)
+        .bind(now)
+        .bind(stripe_subscription_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_subscription_by_stripe_id(
+        &self,
+        stripe_subscription_id: &str,
+    ) -> Result<Option<Subscription>> {
         let row = sqlx::query(
             "SELECT id, user_id, org_id, stripe_customer_id, stripe_subscription_id, plan_id, status,
                     current_period_start, current_period_end, cancel_at_period_end
@@ -265,6 +318,7 @@ impl BillingRepository {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_subscription_transaction(
         &self,
         user_id: UserId,
@@ -297,6 +351,7 @@ impl BillingRepository {
         Ok(id)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_credit_transaction(
         &self,
         user_id: UserId,
@@ -365,7 +420,10 @@ impl BillingRepository {
         Ok(())
     }
 
-    pub async fn list_subscription_transactions(&self, user_id: UserId) -> Result<Vec<SubscriptionTransaction>> {
+    pub async fn list_subscription_transactions(
+        &self,
+        user_id: UserId,
+    ) -> Result<Vec<SubscriptionTransaction>> {
         let rows = sqlx::query(
             "SELECT id, user_id, org_id, subscription_id, event_type, stripe_invoice_id, amount_cents, currency, receipt_url, occurred_at
              FROM subscription_transactions WHERE user_id = $1 ORDER BY occurred_at DESC",
@@ -390,7 +448,10 @@ impl BillingRepository {
             .collect())
     }
 
-    pub async fn list_subscription_transactions_by_org(&self, org_id: OrgId) -> Result<Vec<SubscriptionTransaction>> {
+    pub async fn list_subscription_transactions_by_org(
+        &self,
+        org_id: OrgId,
+    ) -> Result<Vec<SubscriptionTransaction>> {
         let rows = sqlx::query(
             "SELECT id, user_id, org_id, subscription_id, event_type, stripe_invoice_id, amount_cents, currency, receipt_url, occurred_at
              FROM subscription_transactions WHERE org_id = $1 ORDER BY occurred_at DESC",
@@ -415,7 +476,10 @@ impl BillingRepository {
             .collect())
     }
 
-    pub async fn list_credit_transactions(&self, user_id: UserId) -> Result<Vec<CreditTransaction>> {
+    pub async fn list_credit_transactions(
+        &self,
+        user_id: UserId,
+    ) -> Result<Vec<CreditTransaction>> {
         let rows = sqlx::query(
             "SELECT id, user_id, org_id, package_id, amount_tokens, amount_cents, currency, kind, receipt_url, created_at
              FROM credit_transactions WHERE user_id = $1 ORDER BY created_at DESC",
@@ -440,7 +504,10 @@ impl BillingRepository {
             .collect())
     }
 
-    pub async fn list_credit_transactions_by_org(&self, org_id: OrgId) -> Result<Vec<CreditTransaction>> {
+    pub async fn list_credit_transactions_by_org(
+        &self,
+        org_id: OrgId,
+    ) -> Result<Vec<CreditTransaction>> {
         let rows = sqlx::query(
             "SELECT id, user_id, org_id, package_id, amount_tokens, amount_cents, currency, kind, receipt_url, created_at
              FROM credit_transactions WHERE org_id = $1 ORDER BY created_at DESC",
@@ -465,6 +532,7 @@ impl BillingRepository {
             .collect())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn upsert_subscription_plan(
         &self,
         stripe_product_id: &str,
@@ -502,6 +570,7 @@ impl BillingRepository {
         Ok(row.get("id"))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn upsert_token_package(
         &self,
         stripe_product_id: &str,

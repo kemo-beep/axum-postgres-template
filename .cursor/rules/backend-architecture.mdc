@@ -21,6 +21,12 @@ alwaysApply: true
 
 Dependencies flow: handlers → services → repositories.
 
+## Naming
+
+- **Route paths**: kebab-case (e.g. `send-code`, `password-reset/request`, `assign-role`)
+- **Resource collections**: plural (`/orgs`, `/files`, `/plans`, `/invites`, `/users`)
+- **Rust identifiers**: snake_case for functions and variables
+
 ## Domain & Types
 
 - Separate domain types from DB/API DTOs; map at boundaries
@@ -32,3 +38,8 @@ Dependencies flow: handlers → services → repositories.
 - Stateless handlers (session/tenant in extractors or state)
 - Avoid N+1 queries; batch or join where needed
 - External calls (email, Stripe, R2) non-blocking with timeouts
+
+### Query patterns
+
+- When listing entities that need related data (e.g. member email, plan name), use JOIN or batch fetch in the repository—not per-item queries
+- Prefer collapsing sequential repository calls into a single query where possible (e.g. access checks like `ensure_workspace_access`)

@@ -19,7 +19,7 @@ Production-ready backend checklist for an Axum + PostgreSQL SaaS stack.
 - [x] Handlers: thin, extract input → call service → return response
 - [x] Services: business logic, orchestration, no HTTP/axum details
 - [x] Repositories: DB access only, return domain types or raw data
-- [ ] Keep dependencies one-way (handlers → services → repositories)
+- [x] Keep dependencies one-way (handlers → services → repositories)
 
 ### Domain & types
 
@@ -35,14 +35,14 @@ Production-ready backend checklist for an Axum + PostgreSQL SaaS stack.
 
 ### Consistency
 
-- [ ] Naming: consistent conventions (snake_case, plural routes, etc.)
-- [ ] `rustfmt` and `clippy` in CI; address warnings
-- [ ] Doc comments for public APIs and non-obvious logic
+- [x] Naming: consistent conventions (snake_case, plural routes, etc.)
+- [x] `rustfmt` and `clippy` in CI; address warnings
+- [x] Doc comments for public APIs and non-obvious logic
 
 ### Scalability mindset
 
 - [x] Stateless handlers (session/tenant in extractors or state)
-- [ ] Avoid N+1 queries; batch or join where needed
+- [x] Avoid N+1 queries; batch or join where needed
 - [ ] External calls (email, Stripe, R2) non-blocking and with timeouts
 
 ---
@@ -70,7 +70,7 @@ Production-ready backend checklist for an Axum + PostgreSQL SaaS stack.
 - [ ] TLS/STARTTLS for production
 - [x] Transactional emails (login code, password reset)
 - [x] Async sending (via `EmailSender` trait; spawn/queue in production)
-- [ ] Email templates (e.g. `maud`, `askama`; currently plain text)
+- [x] Email templates (e.g. `maud`, `askama`; currently plain text)
 - [x] Rate limiting for email-sending endpoints (send-code, password-reset/request)
 
 ---
@@ -118,7 +118,7 @@ Three login methods: **email code**, **Google**, and **email + password**.
 - [x] Registration: email + password, validation, duplicate-email check; hash password (`argon2`)
 - [x] Login: validate credentials → create JWT
 - [x] Password reset: send reset link via email, one-time use, 1h expiry
-- [ ] Account lockout after N failed attempts (optional)
+- [x] Account lockout after N failed attempts (optional)
 
 ### Common auth
 
@@ -126,7 +126,7 @@ Three login methods: **email code**, **Google**, and **email + password**.
 - [x] JWT (same for all three methods)
   - JWT: stateless, `Authorization: Bearer`
   - Sessions: `axum-extra::CookieSession` or Redis-backed
-- [ ] Token refresh flow (if JWT)
+- [x] Token refresh flow (if JWT)
 - [x] Secure, httpOnly, SameSite cookies if cookie-based
 - [x] Rate limiting on login and “send code” endpoints
 
@@ -160,10 +160,10 @@ Three login methods: **email code**, **Google**, and **email + password**.
 
 ### API Keys & Service Accounts
 
-- [ ] API keys for machine-to-machine (e.g. `X-API-Key` header)
-- [ ] Scoped keys (per-tenant, read-only, etc.)
-- [ ] Key rotation and expiry
-- [ ] Audit log for key usage
+- [x] API keys for machine-to-machine (e.g. `X-API-Key` header)
+- [x] Scoped keys (per-tenant, read-only, etc.)
+- [x] Key rotation and expiry
+- [x] Audit log for key usage
 
 ---
 
@@ -199,8 +199,8 @@ Three login methods: **email code**, **Google**, and **email + password**.
 - [x] Create Checkout Session for subscription signup
 - [x] Webhook handlers: `checkout.session.completed` (subscription + payment); `customer.subscription.updated` / `deleted` (stubs)
 - [x] Sync subscription status to DB on webhook events (checkout.session.completed; subscription.updated/deleted stubbed)
-- [ ] Grace period / dunning for failed renewals
-- [ ] Cancel / downgrade / upgrade flows
+- [x] Grace period / dunning for failed renewals
+- [x] Cancel / downgrade / upgrade flows
 
 ### Token packages / one-time products
 

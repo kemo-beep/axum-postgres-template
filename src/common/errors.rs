@@ -54,8 +54,13 @@ pub enum ApiError {
     /// Rate limit exceeded (429).
     #[error("Too many requests.")]
     TooManyRequests,
+
+    /// Account locked due to too many failed login attempts (423).
+    #[error("Account temporarily locked: {0}")]
+    AccountLocked(String),
 }
 
+/// JSON body returned for API errors. Used in OpenAPI and error responses.
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct ApiErrorResp {
     pub message: String,
@@ -80,7 +85,8 @@ impl IntoResponse for ApiError {
             },
             ApiError::InvalidRequest(_)
             | ApiError::Conflict(_)
-            | ApiError::UnprocessableEntity(_) => format!("{}", self),
+            | ApiError::UnprocessableEntity(_)
+            | ApiError::AccountLocked(_) => format!("{}", self),
             ApiError::Unauthorized | ApiError::Forbidden | ApiError::NotFound => {
                 format!("{}", self)
             }
@@ -104,6 +110,7 @@ impl IntoResponse for ApiError {
             ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::UnprocessableEntity(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
+            ApiError::AccountLocked(_) => StatusCode::from_u16(423).unwrap(),
             ApiError::DatabaseError(_) | ApiError::InternalError(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }

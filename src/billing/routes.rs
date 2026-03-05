@@ -2,8 +2,8 @@
 
 use axum::{
     body::Bytes,
-    extract::{Query, State},
     extract::rejection::JsonRejection,
+    extract::{Query, State},
     http::HeaderMap,
     routing::{get, post},
     Json, Router,
@@ -37,7 +37,9 @@ pub async fn stripe_webhook(
     let billing = state
         .billing_service
         .as_ref()
-        .ok_or(ApiError::InternalError(anyhow::anyhow!("Stripe not configured")))?;
+        .ok_or(ApiError::InternalError(anyhow::anyhow!(
+            "Stripe not configured"
+        )))?;
 
     let sig = headers
         .get("stripe-signature")
@@ -95,14 +97,19 @@ pub struct TransactionItem {
         (status = 500, description = "Billing not configured", body = crate::common::ApiErrorResp)
     )
 )]
-pub async fn list_plans(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
-    let billing = state.billing_service.as_ref().ok_or(ApiError::InternalError(
-        anyhow::anyhow!("Billing not configured"),
-    ))?;
+pub async fn list_plans(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let billing = state
+        .billing_service
+        .as_ref()
+        .ok_or(ApiError::InternalError(anyhow::anyhow!(
+            "Billing not configured"
+        )))?;
     let plans = billing
         .list_plans()
         .await
-        .map_err(|e| ApiError::InternalError(e.into()))?;
+        .map_err(ApiError::InternalError)?;
     Ok(Json(serde_json::json!(plans)))
 }
 
@@ -115,14 +122,19 @@ pub async fn list_plans(State(state): State<AppState>) -> Result<Json<serde_json
         (status = 500, description = "Billing not configured", body = crate::common::ApiErrorResp)
     )
 )]
-pub async fn list_packages(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
-    let billing = state.billing_service.as_ref().ok_or(ApiError::InternalError(
-        anyhow::anyhow!("Billing not configured"),
-    ))?;
+pub async fn list_packages(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let billing = state
+        .billing_service
+        .as_ref()
+        .ok_or(ApiError::InternalError(anyhow::anyhow!(
+            "Billing not configured"
+        )))?;
     let packages = billing
         .list_packages()
         .await
-        .map_err(|e| ApiError::InternalError(e.into()))?;
+        .map_err(ApiError::InternalError)?;
     Ok(Json(serde_json::json!(packages)))
 }
 
@@ -146,14 +158,21 @@ pub async fn checkout(
     req: Result<Json<CheckoutRequest>, JsonRejection>,
 ) -> Result<Json<UrlResponse>, ApiError> {
     let Json(req) = req?;
-    let billing = state.billing_service.as_ref().ok_or(ApiError::InternalError(
-        anyhow::anyhow!("Billing not configured"),
-    ))?;
+    let billing = state
+        .billing_service
+        .as_ref()
+        .ok_or(ApiError::InternalError(anyhow::anyhow!(
+            "Billing not configured"
+        )))?;
 
     let mode = match req.mode.as_str() {
         "subscription" => stripe::CheckoutSessionMode::Subscription,
         "payment" => stripe::CheckoutSessionMode::Payment,
-        _ => return Err(ApiError::InvalidRequest("mode must be subscription or payment".into())),
+        _ => {
+            return Err(ApiError::InvalidRequest(
+                "mode must be subscription or payment".into(),
+            ))
+        }
     };
 
     let url = billing
@@ -190,9 +209,12 @@ pub async fn portal(
     Query(q): axum::extract::Query<PortalQuery>,
 ) -> Result<Json<UrlResponse>, ApiError> {
     let return_url = q.return_url.unwrap_or_else(|| state.cfg.base_url.clone());
-    let billing = state.billing_service.as_ref().ok_or(ApiError::InternalError(
-        anyhow::anyhow!("Billing not configured"),
-    ))?;
+    let billing = state
+        .billing_service
+        .as_ref()
+        .ok_or(ApiError::InternalError(anyhow::anyhow!(
+            "Billing not configured"
+        )))?;
 
     let url = billing.create_portal_session(user.id, &return_url).await?;
     Ok(Json(UrlResponse { url }))
@@ -219,14 +241,17 @@ pub async fn transactions(
     State(state): State<AppState>,
     RequireOrgMember(_user, org_id): RequireOrgMember,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let billing = state.billing_service.as_ref().ok_or(ApiError::InternalError(
-        anyhow::anyhow!("Billing not configured"),
-    ))?;
+    let billing = state
+        .billing_service
+        .as_ref()
+        .ok_or(ApiError::InternalError(anyhow::anyhow!(
+            "Billing not configured"
+        )))?;
 
     let (sub_tx, credit_tx) = billing
         .list_transactions_by_org(org_id)
         .await
-        .map_err(|e| ApiError::InternalError(e.into()))?;
+        .map_err(ApiError::InternalError)?;
 
     Ok(Json(serde_json::json!({
         "subscription_transactions": sub_tx,
@@ -234,12 +259,100 @@ pub async fn transactions(
     })))
 }
 
+#[derive(Deserialize, ToSchema)]
+pub struct ChangePlanRequest {
+    pub price_id: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/orgs/{org_id}/billing/subscription/cancel",
+    tag = "Billing",
+    params(("org_id" = String, description = "Org UUID"), ("immediate" = Option<bool>, Query, description = "Cancel immediately (default: at period end)")),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Subscription cancel scheduled or completed"),
+        (status = 400, description = "Invalid request", body = crate::common::ApiErrorResp),
+        (status = 401, description = "Unauthorized", body = crate::common::ApiErrorResp),
+        (status = 403, description = "Forbidden", body = crate::common::ApiErrorResp),
+        (status = 404, description = "No subscription", body = crate::common::ApiErrorResp),
+        (status = 500, description = "Billing not configured", body = crate::common::ApiErrorResp)
+    )
+)]
+pub async fn subscription_cancel(
+    State(state): State<AppState>,
+    RequireOrgMember(user, org_id): RequireOrgMember,
+    Query(q): Query<CancelQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let billing = state
+        .billing_service
+        .as_ref()
+        .ok_or(ApiError::InternalError(anyhow::anyhow!(
+            "Billing not configured"
+        )))?;
+
+    if q.immediate.unwrap_or(false) {
+        billing
+            .cancel_subscription_immediately(user.id, org_id)
+            .await?;
+    } else {
+        billing
+            .cancel_subscription_at_period_end(user.id, org_id)
+            .await?;
+    }
+
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+pub struct CancelQuery {
+    immediate: Option<bool>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/orgs/{org_id}/billing/subscription/change-plan",
+    tag = "Billing",
+    params(("org_id" = String, description = "Org UUID")),
+    request_body = ChangePlanRequest,
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Plan change scheduled"),
+        (status = 400, description = "Invalid request", body = crate::common::ApiErrorResp),
+        (status = 401, description = "Unauthorized", body = crate::common::ApiErrorResp),
+        (status = 403, description = "Forbidden", body = crate::common::ApiErrorResp),
+        (status = 404, description = "No subscription", body = crate::common::ApiErrorResp),
+        (status = 500, description = "Billing not configured", body = crate::common::ApiErrorResp)
+    )
+)]
+pub async fn subscription_change_plan(
+    State(state): State<AppState>,
+    RequireOrgMember(user, org_id): RequireOrgMember,
+    req: Result<Json<ChangePlanRequest>, JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(req) = req?;
+    let billing = state
+        .billing_service
+        .as_ref()
+        .ok_or(ApiError::InternalError(anyhow::anyhow!(
+            "Billing not configured"
+        )))?;
+
+    billing
+        .change_subscription_plan(user.id, org_id, &req.price_id)
+        .await?;
+
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 pub fn billing_router(state: &AppState) -> Router<AppState> {
     let protected = Router::new()
         .route("/checkout", post(checkout))
         .route("/portal", get(portal))
         .route("/transactions", get(transactions))
-        .route_layer(from_extractor_with_state::<RequireBillingManage, _>(state.clone()));
+        .route_layer(from_extractor_with_state::<RequireBillingManage, _>(
+            state.clone(),
+        ));
     Router::new()
         .route("/plans", get(list_plans))
         .route("/packages", get(list_packages))
@@ -252,7 +365,11 @@ pub fn org_billing_router(state: &AppState) -> Router<AppState> {
         .route("/checkout", post(checkout))
         .route("/portal", get(portal))
         .route("/transactions", get(transactions))
-        .route_layer(from_extractor_with_state::<RequireBillingManage, _>(state.clone()));
+        .route("/subscription/cancel", post(subscription_cancel))
+        .route("/subscription/change-plan", post(subscription_change_plan))
+        .route_layer(from_extractor_with_state::<RequireBillingManage, _>(
+            state.clone(),
+        ));
     Router::new()
         .route("/plans", get(list_plans))
         .route("/packages", get(list_packages))

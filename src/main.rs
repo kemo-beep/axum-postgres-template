@@ -37,7 +37,10 @@ async fn main() {
                 Some(s)
             }
             Err(e) => {
-                tracing::debug!("R2 storage not available: {} (add aws-sdk-s3 for full support)", e);
+                tracing::debug!(
+                    "R2 storage not available: {} (add aws-sdk-s3 for full support)",
+                    e
+                );
                 None
             }
         },
@@ -47,10 +50,13 @@ async fn main() {
     let router = server::router(cfg, db, storage_service);
 
     // Use connect_info for rate limiting (tower_governor PeerIpKeyExtractor)
-    axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>())
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .expect("Failed to start server");
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .expect("Failed to start server");
 
     tracing::info!("Server shut down");
 }

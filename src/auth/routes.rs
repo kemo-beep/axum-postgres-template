@@ -1,8 +1,8 @@
 //! Auth routes under /v1/auth/.
 
 use axum::{
-    extract::{Query, State},
     extract::rejection::JsonRejection,
+    extract::{Query, State},
     http::HeaderMap,
     response::Redirect,
     routing::{get, post},
@@ -15,10 +15,9 @@ use std::sync::Arc;
 use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use utoipa::ToSchema;
 
-use crate::common::ApiError;
 use crate::auth::extractor::RequireAuth;
-use crate::auth::repository::RbacRepository;
 use crate::cfg::Environment;
+use crate::common::ApiError;
 use crate::AppState;
 
 fn build_auth_cookie(token: &str, cfg: &crate::cfg::Configuration) -> Cookie<'static> {
@@ -111,7 +110,9 @@ pub fn router() -> Router<AppState> {
         .route("/google", get(google_redirect))
         .route("/google/callback", get(google_callback))
         .route("/me", get(me))
+        .route("/refresh", post(refresh))
         .route("/logout", post(logout))
+        .nest("/api-keys", crate::auth::api_key_routes::router())
 }
 
 /// Send a 6-digit login code to the given email. Rate limited (5/min per IP).
@@ -135,7 +136,9 @@ pub async fn send_code(
     let auth = state
         .auth_service
         .as_ref()
-        .ok_or(ApiError::InternalError(anyhow::anyhow!("Auth not configured")))?;
+        .ok_or(ApiError::InternalError(anyhow::anyhow!(
+            "Auth not configured"
+        )))?;
     auth.send_login_code(&req.email).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -162,7 +165,9 @@ pub async fn verify_code(
     let auth = state
         .auth_service
         .as_ref()
-        .ok_or(ApiError::InternalError(anyhow::anyhow!("Auth not configured")))?;
+        .ok_or(ApiError::InternalError(anyhow::anyhow!(
+            "Auth not configured"
+        )))?;
     let user = auth.verify_code(&req.email, &req.code).await?;
     let access_token = auth.create_access_token(user.id)?;
     let cookie = build_auth_cookie(&access_token, &state.cfg);
@@ -198,7 +203,9 @@ pub async fn register(
     let auth = state
         .auth_service
         .as_ref()
-        .ok_or(ApiError::InternalError(anyhow::anyhow!("Auth not configured")))?;
+        .ok_or(ApiError::InternalError(anyhow::anyhow!(
+            "Auth not configured"
+        )))?;
     let user = auth.register(&req.email, &req.password).await?;
     let access_token = auth.create_access_token(user.id)?;
     let cookie = build_auth_cookie(&access_token, &state.cfg);
@@ -212,6 +219,7 @@ pub async fn register(
 }
 
 /// Login with email and password. Rate limited.
+/// Account lockout: after N failed attempts (default 5), account is locked for X minutes (default 15).
 #[utoipa::path(
     post,
     path = "/v1/auth/login",
@@ -221,6 +229,7 @@ pub async fn register(
         (status = 200, description = "Token", body = AuthResponse),
         (status = 400, description = "Bad request", body = crate::common::ApiErrorResp),
         (status = 401, description = "Invalid credentials", body = crate::common::ApiErrorResp),
+        (status = 423, description = "Account temporarily locked", body = crate::common::ApiErrorResp),
         (status = 429, description = "Too many requests", body = crate::common::ApiErrorResp),
         (status = 500, description = "Internal error", body = crate::common::ApiErrorResp)
     )
@@ -234,7 +243,9 @@ pub async fn login(
     let auth = state
         .auth_service
         .as_ref()
-        .ok_or(ApiError::InternalError(anyhow::anyhow!("Auth not configured")))?;
+        .ok_or(ApiError::InternalError(anyhow::anyhow!(
+            "Auth not configured"
+        )))?;
     let user = auth.login_password(&req.email, &req.password).await?;
     let access_token = auth.create_access_token(user.id)?;
     let cookie = build_auth_cookie(&access_token, &state.cfg);
@@ -262,9 +273,14 @@ pub async fn google_redirect(State(state): State<AppState>) -> Result<Redirect, 
         .cfg
         .google_client_id
         .as_deref()
-        .ok_or(ApiError::InternalError(anyhow::anyhow!("Google OAuth not configured")))?;
+        .ok_or(ApiError::InternalError(anyhow::anyhow!(
+            "Google OAuth not configured"
+        )))?;
 
-    let redirect_uri = format!("{}/v1/auth/google/callback", state.cfg.base_url.trim_end_matches('/'));
+    let redirect_uri = format!(
+        "{}/v1/auth/google/callback",
+        state.cfg.base_url.trim_end_matches('/')
+    );
     let auth_url = oauth2::basic::BasicClient::new(
         oauth2::ClientId::new(client_id.to_string()),
         None,
@@ -276,7 +292,8 @@ pub async fn google_redirect(State(state): State<AppState>) -> Result<Redirect, 
         ),
     )
     .set_redirect_uri(
-        oauth2::RedirectUrl::new(redirect_uri.clone()).map_err(|e| ApiError::InternalError(e.into()))?,
+        oauth2::RedirectUrl::new(redirect_uri.clone())
+            .map_err(|e| ApiError::InternalError(e.into()))?,
     )
     .authorize_url(oauth2::CsrfToken::new_random)
     .add_scope(oauth2::Scope::new("openid".to_string()))
@@ -307,9 +324,14 @@ pub async fn google_callback(
     let auth = state
         .auth_service
         .as_ref()
-        .ok_or(ApiError::InternalError(anyhow::anyhow!("Auth not configured")))?;
+        .ok_or(ApiError::InternalError(anyhow::anyhow!(
+            "Auth not configured"
+        )))?;
 
-    let redirect_uri = format!("{}/v1/auth/google/callback", state.cfg.base_url.trim_end_matches('/'));
+    let redirect_uri = format!(
+        "{}/v1/auth/google/callback",
+        state.cfg.base_url.trim_end_matches('/')
+    );
     let user = auth.login_google(&query.code, &redirect_uri).await?;
     let access_token = auth.create_access_token(user.id)?;
     let cookie = build_auth_cookie(&access_token, &state.cfg);
@@ -342,7 +364,9 @@ pub async fn password_reset_request(
     let auth = state
         .auth_service
         .as_ref()
-        .ok_or(ApiError::InternalError(anyhow::anyhow!("Auth not configured")))?;
+        .ok_or(ApiError::InternalError(anyhow::anyhow!(
+            "Auth not configured"
+        )))?;
     auth.password_reset_request(&req.email).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -367,9 +391,49 @@ pub async fn password_reset_confirm(
     let auth = state
         .auth_service
         .as_ref()
-        .ok_or(ApiError::InternalError(anyhow::anyhow!("Auth not configured")))?;
-    auth.password_reset_confirm(&req.token, &req.new_password).await?;
+        .ok_or(ApiError::InternalError(anyhow::anyhow!(
+            "Auth not configured"
+        )))?;
+    auth.password_reset_confirm(&req.token, &req.new_password)
+        .await?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Refresh the access token. Accepts Bearer or cookie; returns new token and sets cookie.
+/// Old token is blacklisted (rotation). Tokens expired up to 5 minutes ago are accepted.
+#[utoipa::path(
+    post,
+    path = "/v1/auth/refresh",
+    tag = "Auth",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "New token", body = AuthResponse),
+        (status = 401, description = "Invalid or expired token", body = crate::common::ApiErrorResp)
+    )
+)]
+pub async fn refresh(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+) -> Result<(CookieJar, Json<AuthResponse>), ApiError> {
+    let token =
+        crate::auth::extractor::token_from_headers_or_jar(&headers, &jar, &state.cfg.cookie_name)
+            .ok_or(ApiError::Unauthorized)?;
+    let auth = state
+        .auth_service
+        .as_ref()
+        .ok_or(ApiError::InternalError(anyhow::anyhow!(
+            "Auth not configured"
+        )))?;
+    let access_token = auth.refresh_token(&token).await?;
+    let cookie = build_auth_cookie(&access_token, &state.cfg);
+    Ok((
+        jar.add(cookie),
+        Json(AuthResponse {
+            access_token,
+            token_type: "Bearer".to_string(),
+        }),
+    ))
 }
 
 /// Logout (blacklist the current token). Requires Authorization: Bearer or session cookie.
@@ -388,16 +452,15 @@ pub async fn logout(
     jar: CookieJar,
     headers: HeaderMap,
 ) -> Result<(CookieJar, Json<serde_json::Value>), ApiError> {
-    let token = crate::auth::extractor::token_from_headers_or_jar(
-        &headers,
-        &jar,
-        &state.cfg.cookie_name,
-    )
-    .ok_or(ApiError::Unauthorized)?;
+    let token =
+        crate::auth::extractor::token_from_headers_or_jar(&headers, &jar, &state.cfg.cookie_name)
+            .ok_or(ApiError::Unauthorized)?;
     let auth = state
         .auth_service
         .as_ref()
-        .ok_or(ApiError::InternalError(anyhow::anyhow!("Auth not configured")))?;
+        .ok_or(ApiError::InternalError(anyhow::anyhow!(
+            "Auth not configured"
+        )))?;
     auth.logout(&token).await?;
     let cookie_name = state.cfg.cookie_name.clone();
     let cleared_jar = jar.remove(Cookie::build(cookie_name).path("/").removal());
@@ -419,15 +482,8 @@ pub async fn me(
     State(state): State<AppState>,
     RequireAuth(user): RequireAuth,
 ) -> Result<Json<UserResponse>, ApiError> {
-    let rbac = RbacRepository::new(state.db.pool.clone());
-    let roles = rbac
-        .get_user_roles(user.id)
-        .await
-        .map_err(|e| ApiError::InternalError(e.into()))?;
-    let permissions = rbac
-        .get_user_permissions(user.id)
-        .await
-        .map_err(|e| ApiError::InternalError(e.into()))?;
+    let roles = state.rbac_service.get_user_roles(user.id).await?;
+    let permissions = state.rbac_service.get_user_permissions(user.id).await?;
     Ok(Json(UserResponse {
         id: user.id.0.to_string(),
         email: user.email,

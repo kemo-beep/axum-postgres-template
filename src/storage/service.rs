@@ -14,6 +14,7 @@ use aws_types::region::Region;
 
 use crate::cfg::R2Config;
 
+/// R2/S3-compatible storage: presigned URLs for get/put, direct upload.
 #[derive(Clone)]
 pub struct StorageService {
     client: Client,
@@ -46,9 +47,7 @@ impl StorageService {
     }
 
     pub async fn presigned_get(&self, key: &str, expires_in: Duration) -> Result<String> {
-        let presigning_config = PresigningConfig::builder()
-            .expires_in(expires_in)
-            .build()?;
+        let presigning_config = PresigningConfig::builder().expires_in(expires_in).build()?;
 
         let presigned = self
             .client
@@ -62,9 +61,7 @@ impl StorageService {
     }
 
     pub async fn presigned_put(&self, key: &str, expires_in: Duration) -> Result<String> {
-        let presigning_config = PresigningConfig::builder()
-            .expires_in(expires_in)
-            .build()?;
+        let presigning_config = PresigningConfig::builder().expires_in(expires_in).build()?;
 
         let presigned = self
             .client

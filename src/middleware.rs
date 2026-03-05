@@ -11,8 +11,7 @@ use tower_http::{
 };
 
 /// Layer for X-Content-Type-Options: nosniff.
-pub fn x_content_type_options_layer(
-) -> SetResponseHeaderLayer<HeaderValue> {
+pub fn x_content_type_options_layer() -> SetResponseHeaderLayer<HeaderValue> {
     SetResponseHeaderLayer::if_not_present(
         HeaderName::from_static("x-content-type-options"),
         HeaderValue::from_static("nosniff"),

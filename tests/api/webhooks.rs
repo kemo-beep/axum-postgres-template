@@ -1,6 +1,9 @@
 //! Webhooks integration tests: Stripe webhook endpoint.
 
-use axum::{body::Body, http::{Method, Request, StatusCode}};
+use axum::{
+    body::Body,
+    http::{Method, Request, StatusCode},
+};
 
 use crate::helpers::*;
 

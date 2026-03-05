@@ -12,7 +12,6 @@ use uuid::Uuid;
 use crate::auth::extractor::RequireAuth;
 use crate::common::{ApiError, OrgId};
 use crate::org::repository::{Org, Workspace};
-use crate::org::service::OrgService;
 use crate::AppState;
 
 #[derive(Deserialize, ToSchema)]
@@ -81,12 +80,6 @@ fn workspace_to_response(w: &Workspace) -> WorkspaceResponse {
     }
 }
 
-fn org_service(state: &AppState) -> OrgService {
-    let repo = crate::org::repository::OrgRepository::new(state.db.pool.clone());
-    let user_repo = crate::auth::repository::UserRepository::new(state.db.pool.clone());
-    OrgService::new(repo, user_repo)
-}
-
 /// List orgs the current user belongs to.
 #[utoipa::path(
     get,
@@ -103,8 +96,7 @@ pub async fn list_orgs(
     State(state): State<AppState>,
     RequireAuth(user): RequireAuth,
 ) -> Result<Json<Vec<OrgResponse>>, ApiError> {
-    let svc = org_service(&state);
-    let orgs = svc.get_user_orgs(user.id).await?;
+    let orgs = state.org_service.get_user_orgs(user.id).await?;
     Ok(Json(orgs.iter().map(org_to_response).collect()))
 }
 
@@ -127,9 +119,11 @@ pub async fn create_org(
     RequireAuth(user): RequireAuth,
     Json(req): Json<CreateOrgRequest>,
 ) -> Result<Json<OrgResponse>, ApiError> {
-    let svc = org_service(&state);
     let slug = req.slug.as_deref();
-    let org = svc.create_org(user.id, &req.name, slug).await?;
+    let org = state
+        .org_service
+        .create_org(user.id, &req.name, slug)
+        .await?;
     Ok(Json(org_to_response(&org)))
 }
 
@@ -154,8 +148,7 @@ pub async fn get_org(
 ) -> Result<Json<OrgResponse>, ApiError> {
     let org_id = Uuid::parse_str(&org_id).map_err(|_| ApiError::NotFound)?;
     let org_id = OrgId::from_uuid(org_id);
-    let svc = org_service(&state);
-    let org = svc.get_org(org_id, user.id).await?;
+    let org = state.org_service.get_org(org_id, user.id).await?;
     Ok(Json(org_to_response(&org)))
 }
 
@@ -180,9 +173,7 @@ pub async fn list_members(
 ) -> Result<Json<Vec<OrgMemberResponse>>, ApiError> {
     let org_id = Uuid::parse_str(&org_id).map_err(|_| ApiError::NotFound)?;
     let org_id = OrgId::from_uuid(org_id);
-    let repo = crate::org::repository::OrgRepository::new(state.db.pool.clone());
-    repo.ensure_user_in_org(user.id, org_id).await?;
-    let members = repo.get_org_members(org_id).await.map_err(|e| ApiError::InternalError(e.into()))?;
+    let members = state.org_service.list_members(org_id, user.id).await?;
     Ok(Json(
         members
             .iter()
@@ -218,8 +209,10 @@ pub async fn create_invite(
 ) -> Result<Json<InviteResponse>, ApiError> {
     let org_id = Uuid::parse_str(&org_id).map_err(|_| ApiError::NotFound)?;
     let org_id = OrgId::from_uuid(org_id);
-    let svc = org_service(&state);
-    let token = svc.create_invite(org_id, user.id, &req.email, &req.role).await?;
+    let token = state
+        .org_service
+        .create_invite(org_id, user.id, &req.email, &req.role)
+        .await?;
     Ok(Json(InviteResponse { token }))
 }
 
@@ -242,8 +235,7 @@ pub async fn accept_invite(
     RequireAuth(user): RequireAuth,
     Json(req): Json<AcceptInviteRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let svc = org_service(&state);
-    svc.accept_invite(&req.token, user.id).await?;
+    state.org_service.accept_invite(&req.token, user.id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -268,8 +260,7 @@ pub async fn list_workspaces(
 ) -> Result<Json<Vec<WorkspaceResponse>>, ApiError> {
     let org_id = Uuid::parse_str(&org_id).map_err(|_| ApiError::NotFound)?;
     let org_id = OrgId::from_uuid(org_id);
-    let svc = org_service(&state);
-    let workspaces = svc.list_workspaces(org_id, user.id).await?;
+    let workspaces = state.org_service.list_workspaces(org_id, user.id).await?;
     Ok(Json(workspaces.iter().map(workspace_to_response).collect()))
 }
 
@@ -296,9 +287,11 @@ pub async fn create_workspace(
 ) -> Result<Json<WorkspaceResponse>, ApiError> {
     let org_id = Uuid::parse_str(&org_id).map_err(|_| ApiError::NotFound)?;
     let org_id = OrgId::from_uuid(org_id);
-    let svc = org_service(&state);
     let slug = req.slug.as_deref();
-    let ws = svc.create_workspace(org_id, user.id, &req.name, slug).await?;
+    let ws = state
+        .org_service
+        .create_workspace(org_id, user.id, &req.name, slug)
+        .await?;
     Ok(Json(workspace_to_response(&ws)))
 }
 
@@ -309,7 +302,10 @@ pub fn router() -> Router<AppState> {
         .route("/{org_id}", get(get_org))
         .route("/{org_id}/members", get(list_members))
         .route("/{org_id}/invites", post(create_invite))
-        .route("/{org_id}/workspaces", get(list_workspaces).post(create_workspace))
+        .route(
+            "/{org_id}/workspaces",
+            get(list_workspaces).post(create_workspace),
+        )
 }
 
 /// Router for invite-only routes (e.g. /v1/invites/accept).

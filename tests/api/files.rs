@@ -1,6 +1,9 @@
 //! Files integration tests: presigned URL endpoint.
 
-use axum::{body::Body, http::{Method, Request, StatusCode}};
+use axum::{
+    body::Body,
+    http::{Method, Request, StatusCode},
+};
 
 use crate::helpers::*;
 
@@ -24,7 +27,9 @@ async fn test_files_presigned_url_no_token() {
 async fn test_files_presigned_url_invalid_token() {
     let app = TestApp::new().await;
 
-    let resp = app.get_with_bearer("/v1/files/some-key/url", "invalid.jwt.token").await;
+    let resp = app
+        .get_with_bearer("/v1/files/some-key/url", "invalid.jwt.token")
+        .await;
 
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
@@ -34,7 +39,9 @@ async fn test_files_presigned_url_invalid_token() {
 async fn test_files_presigned_url_storage_not_configured() {
     let app = TestApp::new().await;
 
-    let token = app.get_token_via_register("files@example.com", "secret123").await;
+    let token = app
+        .get_token_via_register("files@example.com", "secret123")
+        .await;
     let Some(tok) = token else {
         return; // Auth not configured
     };
