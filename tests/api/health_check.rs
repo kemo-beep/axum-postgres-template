@@ -17,6 +17,10 @@ async fn test_health_check_ok() {
     assert!(headers.get("x-request-id").is_some());
     assert_eq!(headers.get("access-control-allow-origin").unwrap(), "*");
     assert!(headers.get("vary").is_some());
+
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body.get("status").and_then(|v| v.as_str()), Some("ok"));
 }
 
 #[tokio::test]
