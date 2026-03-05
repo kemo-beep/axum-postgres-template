@@ -1,0 +1,34 @@
+---
+description: Backend architecture and structure for scalability and maintainability
+alwaysApply: true
+---
+
+# Backend Architecture
+
+## Structure
+
+- **Clear module boundaries**: `routes/`, `handlers/`, `services/`, `models/`, `repositories/`
+- **Feature-based layout** for new domains (e.g. `auth/`, `billing/`, `storage/`)
+- Shared types and errors in a central place; avoid circular deps
+
+## Layering (one-way flow)
+
+| Layer | Responsibility |
+|-------|----------------|
+| **Handlers** | Thin: extract input → call service → return response |
+| **Services** | Business logic, orchestration, no HTTP/axum details |
+| **Repositories** | DB access only, return domain types or raw data |
+
+Dependencies flow: handlers → services → repositories.
+
+## Domain & Types
+
+- Separate domain types from DB/API DTOs; map at boundaries
+- Use enums for bounded states (subscription status, role, etc.)
+- Newtype wrappers for IDs (`UserId`, `TenantId`) to avoid mixing
+
+## Scalability
+
+- Stateless handlers (session/tenant in extractors or state)
+- Avoid N+1 queries; batch or join where needed
+- External calls (email, Stripe, R2) non-blocking with timeouts

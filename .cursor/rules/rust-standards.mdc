@@ -1,0 +1,34 @@
+---
+description: Rust code standards for maintainability
+globs: "**/*.rs"
+alwaysApply: false
+---
+
+# Rust Code Standards
+
+## Errors
+
+```rust
+// ❌ BAD
+let user = repo.get(id).unwrap();
+} catch {}
+
+// ✅ GOOD
+let user = repo.get(id).await?;
+// Use thiserror + ApiError at handler boundary; log internal errors, return generic messages
+```
+
+- Use `thiserror` / `anyhow`; convert to `ApiError` at handler boundary
+- Avoid `unwrap()` in production paths; use `?` and propagate
+- Don't leak internal errors to clients
+
+## Consistency
+
+- Naming: snake_case, plural routes (`/users`, `/health`)
+- Run `rustfmt` and `clippy`; address warnings
+- Doc comments for public APIs and non-obvious logic
+
+## Conventions
+
+- Keep handlers thin; move logic to services
+- Prefer explicit types over `impl Trait` for public APIs when clarity helps

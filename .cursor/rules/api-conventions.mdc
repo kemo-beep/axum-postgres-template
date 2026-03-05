@@ -1,0 +1,61 @@
+---
+description: API and handler conventions plus REST API best practices
+globs: "src/routes/**/*.rs,src/handlers/**/*.rs"
+alwaysApply: false
+---
+
+# API & Handler Conventions
+
+## Handler Pattern
+
+```rust
+// ✅ Thin handler
+async fn get_user(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    RequireAuth(user): RequireAuth,
+) -> Result<Json<UserResponse>, ApiError> {
+    let user = state.user_service.get_by_id(id).await?;
+    Ok(Json(user.into()))
+}
+```
+
+- Extract input (path, query, body, auth)
+- Call service; propagate errors with `?`
+- Map domain → response at boundary
+
+---
+
+# REST API Best Practices
+
+## Resource & Verbs
+
+- **Nouns, plural**: `/users`, `/subscriptions`, `/token-packages`
+- **HTTP verbs**: GET (read), POST (create), PUT/PATCH (update), DELETE (delete)
+- **Nested resources** when ownership is clear: `/users/{id}/subscriptions`
+
+## Status Codes
+
+| Code | Use |
+|------|-----|
+| 200 | Success (GET, PATCH) |
+| 201 | Created (POST) |
+| 204 | No content (DELETE) |
+| 400 | Bad request (malformed input) |
+| 401 | Unauthorized (missing/invalid auth) |
+| 403 | Forbidden (lacks permission) |
+| 404 | Not found |
+| 409 | Conflict (duplicate, precondition failed) |
+| 422 | Unprocessable (validation errors) |
+| 429 | Too many requests (rate limit) |
+| 500 | Internal server error (never leak internals) |
+
+## Design Rules
+
+- **Versioning**: Prefix with `/v1/`, `/v2/` for future compatibility
+- **Idempotency**: `Idempotency-Key` header for POST/PUT/PATCH/DELETE
+- **Pagination**: Cursor-based or `?limit=&offset=` for list endpoints
+- **Errors**: Consistent JSON `{ "code": "...", "message": "...", "details": {...} }`; never expose stack traces
+- **Validation**: Validate all inputs; return 400/422 with field-level errors
+- **Request/response size limits**; document max payload sizes
+- **Deprecation**: `Sunset` and `Deprecation` headers when retiring endpoints
