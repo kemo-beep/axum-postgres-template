@@ -49,7 +49,7 @@ impl FromRequestParts<AppState> for RequireAuth {
             anyhow::anyhow!("Auth service not configured"),
         ))?;
 
-        let user_id = auth_service.verify_token(token)?;
+        let user_id = auth_service.verify_token(token).await?;
         let user = auth_service
             .get_user(user_id)
             .await?

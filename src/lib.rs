@@ -28,8 +28,18 @@ pub use db::*;
         auth::routes::google_redirect,
         auth::routes::google_callback,
         auth::routes::me,
+        auth::routes::password_reset_request,
+        auth::routes::password_reset_confirm,
+        auth::routes::logout,
         storage::routes::get_presigned_url,
+        storage::routes::get_presigned_put_url,
+        storage::routes::upload,
         billing::routes::stripe_webhook,
+        billing::routes::list_plans,
+        billing::routes::list_packages,
+        billing::routes::checkout,
+        billing::routes::portal,
+        billing::routes::transactions,
     ),
     components(
         schemas(
@@ -38,9 +48,13 @@ pub use db::*;
             auth::routes::VerifyCodeRequest,
             auth::routes::RegisterRequest,
             auth::routes::LoginRequest,
+            auth::routes::PasswordResetRequest,
+            auth::routes::PasswordResetConfirmRequest,
             auth::routes::AuthResponse,
             auth::routes::UserResponse,
             storage::routes::PresignedUrlResponse,
+            billing::routes::CheckoutRequest,
+            billing::routes::UrlResponse,
         )
     ),
     modifiers(&SecurityAddon)
@@ -67,6 +81,7 @@ impl utoipa::Modify for SecurityAddon {
 }
 
 use crate::auth::service::AuthService;
+use crate::billing::service::BillingService;
 use crate::storage::StorageService;
 
 #[derive(Clone)]
@@ -74,6 +89,7 @@ pub struct AppState {
     pub db: Db,
     pub cfg: Config,
     pub auth_service: Option<AuthService>,
+    pub billing_service: Option<BillingService>,
     pub storage_service: Option<StorageService>,
 }
 
@@ -85,18 +101,30 @@ pub fn router(cfg: Config, db: Db, storage_service: Option<StorageService>) -> R
 
         let user_repo = UserRepository::new(db.pool.clone());
         let email_code_repo = EmailCodeRepository::new(db.pool.clone());
+        let password_reset_repo = crate::auth::repository::PasswordResetRepository::new(db.pool.clone());
+        let token_blacklist_repo = crate::auth::repository::TokenBlacklistRepository::new(db.pool.clone());
         let rbac_repo = RbacRepository::new(db.pool.clone());
         let email_sender: Arc<dyn EmailSender> = match &cfg.smtp {
             Some(smtp) => Arc::new(crate::auth::SmtpEmailSender::new(smtp.clone())),
             None => Arc::new(ConsoleEmailSender),
         };
-        AuthService::new(user_repo, email_code_repo, rbac_repo, email_sender, cfg.clone())
+        AuthService::new(user_repo, email_code_repo, password_reset_repo, token_blacklist_repo, rbac_repo, email_sender, cfg.clone())
+    });
+
+    let billing_service = cfg.stripe.as_ref().map(|stripe_cfg| {
+        use crate::auth::repository::UserRepository;
+        use crate::billing::repository::BillingRepository;
+
+        let billing_repo = BillingRepository::new(db.pool.clone());
+        let user_repo = UserRepository::new(db.pool.clone());
+        BillingService::new(stripe_cfg.clone(), billing_repo, user_repo)
     });
 
     let app_state = AppState {
         db,
         cfg,
         auth_service,
+        billing_service,
         storage_service,
     };
 

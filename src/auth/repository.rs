@@ -13,6 +13,7 @@ pub struct User {
     pub email: String,
     pub password_hash: Option<String>,
     pub google_sub: Option<String>,
+    pub stripe_customer_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -49,6 +50,7 @@ impl UserRepository {
             email: row.get("email"),
             password_hash: row.get("password_hash"),
             google_sub: row.get("google_sub"),
+            stripe_customer_id: row.get("stripe_customer_id"),
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
         })
@@ -56,7 +58,7 @@ impl UserRepository {
 
     pub async fn get_by_id(&self, id: UserId) -> Result<Option<User>> {
         let row = sqlx::query(
-            "SELECT id, email, password_hash, google_sub, created_at, updated_at FROM users WHERE id = $1",
+            "SELECT id, email, password_hash, google_sub, stripe_customer_id, created_at, updated_at FROM users WHERE id = $1",
         )
         .bind(id.0)
         .fetch_optional(&self.pool)
@@ -67,6 +69,7 @@ impl UserRepository {
                 email: row.get("email"),
                 password_hash: row.get("password_hash"),
                 google_sub: row.get("google_sub"),
+                stripe_customer_id: row.get("stripe_customer_id"),
                 created_at: row.get("created_at"),
                 updated_at: row.get("updated_at"),
             }),
@@ -76,7 +79,7 @@ impl UserRepository {
 
     pub async fn get_by_email(&self, email: &str) -> Result<Option<User>> {
         let row = sqlx::query(
-            "SELECT id, email, password_hash, google_sub, created_at, updated_at FROM users WHERE email = $1",
+            "SELECT id, email, password_hash, google_sub, stripe_customer_id, created_at, updated_at FROM users WHERE email = $1",
         )
         .bind(email)
         .fetch_optional(&self.pool)
@@ -87,11 +90,23 @@ impl UserRepository {
                 email: row.get("email"),
                 password_hash: row.get("password_hash"),
                 google_sub: row.get("google_sub"),
+                stripe_customer_id: row.get("stripe_customer_id"),
                 created_at: row.get("created_at"),
                 updated_at: row.get("updated_at"),
             }),
             None => None,
         })
+    }
+
+    pub async fn update_stripe_customer_id(&self, user_id: UserId, stripe_customer_id: &str) -> Result<()> {
+        let now = Utc::now();
+        sqlx::query("UPDATE users SET stripe_customer_id = $1, updated_at = $2 WHERE id = $3")
+            .bind(stripe_customer_id)
+            .bind(now)
+            .bind(user_id.0)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn update_google_sub(&self, user_id: UserId, google_sub: &str) -> Result<()> {
@@ -222,5 +237,80 @@ impl RbacRepository {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub struct PasswordResetRepository {
+    pool: PgPool,
+}
+
+impl PasswordResetRepository {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    pub async fn create(&self, user_id: UserId, token_hash: &str, expires_at: DateTime<Utc>) -> Result<Uuid> {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(id)
+        .bind(user_id.0)
+        .bind(token_hash)
+        .bind(expires_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(id)
+    }
+
+    pub async fn find_valid(&self, token_hash: &str) -> Result<Option<(Uuid, UserId)>> {
+        let now = Utc::now();
+        let row = sqlx::query(
+            "SELECT id, user_id FROM password_reset_tokens WHERE token_hash = $1 AND expires_at > $2 AND used_at IS NULL",
+        )
+        .bind(token_hash)
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r: sqlx::postgres::PgRow| (r.get("id"), UserId(r.get("user_id")))))
+    }
+
+    pub async fn mark_used(&self, id: Uuid) -> Result<()> {
+        let now = Utc::now();
+        sqlx::query("UPDATE password_reset_tokens SET used_at = $1 WHERE id = $2")
+            .bind(now)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub struct TokenBlacklistRepository {
+    pool: PgPool,
+}
+
+impl TokenBlacklistRepository {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    pub async fn add(&self, jti: Uuid, exp: DateTime<Utc>) -> Result<()> {
+        sqlx::query("INSERT INTO token_blacklist (jti, exp) VALUES ($1, $2)")
+            .bind(jti)
+            .bind(exp)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn is_blacklisted(&self, jti: Uuid) -> Result<bool> {
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM token_blacklist WHERE jti = $1)")
+            .bind(jti)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(exists)
     }
 }

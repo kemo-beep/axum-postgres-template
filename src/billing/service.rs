@@ -1,0 +1,361 @@
+//! Billing service: Stripe Checkout, Customer Portal, webhook processing.
+
+use anyhow::Result;
+use stripe::{
+    CheckoutSession, CheckoutSessionMode, Client, CreateBillingPortalSession, CreateCheckoutSession,
+    CreateCheckoutSessionLineItems, CreateCustomer, Customer,
+};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+use subtle::ConstantTimeEq;
+use tracing::info;
+
+use crate::api_error::ApiError;
+use crate::auth::repository::UserRepository;
+use crate::billing::repository::BillingRepository;
+use crate::cfg::StripeConfig;
+use crate::types::UserId;
+
+type HmacSha256 = Hmac<Sha256>;
+
+#[derive(Clone)]
+pub struct BillingService {
+    stripe_client: Client,
+    stripe_config: StripeConfig,
+    billing_repo: BillingRepository,
+    user_repo: UserRepository,
+}
+
+impl BillingService {
+    pub async fn list_plans(&self) -> Result<Vec<crate::billing::repository::SubscriptionPlan>> {
+        self.billing_repo.list_subscription_plans().await
+    }
+
+    pub async fn list_packages(&self) -> Result<Vec<crate::billing::repository::TokenPackage>> {
+        self.billing_repo.list_token_packages().await
+    }
+
+    pub async fn list_transactions(
+        &self,
+        user_id: UserId,
+    ) -> Result<(
+        Vec<crate::billing::repository::SubscriptionTransaction>,
+        Vec<crate::billing::repository::CreditTransaction>,
+    )> {
+        let sub = self.billing_repo.list_subscription_transactions(user_id).await?;
+        let credit = self.billing_repo.list_credit_transactions(user_id).await?;
+        Ok((sub, credit))
+    }
+
+    pub fn new(
+        stripe_config: StripeConfig,
+        billing_repo: BillingRepository,
+        user_repo: UserRepository,
+    ) -> Self {
+        let stripe_client = Client::new(stripe_config.secret_key.clone());
+        Self {
+            stripe_client,
+            stripe_config,
+            billing_repo,
+            user_repo,
+        }
+    }
+
+    /// Create a Checkout Session (subscription or payment mode). Returns the redirect URL.
+    pub async fn create_checkout_session(
+        &self,
+        user_id: UserId,
+        mode: CheckoutSessionMode,
+        price_id: &str,
+        success_url: &str,
+        cancel_url: &str,
+    ) -> Result<String, ApiError> {
+        let user = self
+            .user_repo
+            .get_by_id(user_id)
+            .await
+            .map_err(|e| ApiError::InternalError(e.into()))?
+            .ok_or(ApiError::NotFound)?;
+
+        let client_ref = user_id.0.to_string();
+        let mut params = CreateCheckoutSession::new();
+        params.mode = Some(mode.clone());
+        params.success_url = Some(success_url);
+        params.cancel_url = Some(cancel_url);
+        params.client_reference_id = Some(&client_ref);
+        params.line_items = Some(vec![CreateCheckoutSessionLineItems {
+            price: Some(price_id.to_string()),
+            quantity: Some(1),
+            ..Default::default()
+        }]);
+
+        let customer_id = if let Some(ref cid) = user.stripe_customer_id {
+            Some(cid.parse::<stripe::CustomerId>().map_err(|e| ApiError::InternalError(anyhow::anyhow!("{}", e)))?)
+        } else {
+            let customer = Customer::create(
+                &self.stripe_client,
+                CreateCustomer {
+                    email: Some(&user.email),
+                    metadata: Some(std::collections::HashMap::from([(
+                        "user_id".to_string(),
+                        user_id.0.to_string(),
+                    )])),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| ApiError::InternalError(anyhow::anyhow!("Stripe: {}", e)))?;
+
+            self.user_repo
+                .update_stripe_customer_id(user_id, customer.id.as_str())
+                .await
+                .map_err(|e| ApiError::InternalError(e.into()))?;
+
+            Some(customer.id)
+        };
+
+        params.customer = Some(customer_id.unwrap());
+
+        let session = CheckoutSession::create(&self.stripe_client, params)
+            .await
+            .map_err(|e| ApiError::InternalError(anyhow::anyhow!("Stripe: {}", e)))?;
+
+        session
+            .url
+            .ok_or_else(|| ApiError::InternalError(anyhow::anyhow!("No checkout URL returned")))
+    }
+
+    /// Create a Stripe Customer Portal session. Returns the redirect URL.
+    pub async fn create_portal_session(
+        &self,
+        user_id: UserId,
+        return_url: &str,
+    ) -> Result<String, ApiError> {
+        let user = self
+            .user_repo
+            .get_by_id(user_id)
+            .await
+            .map_err(|e| ApiError::InternalError(e.into()))?
+            .ok_or(ApiError::NotFound)?;
+
+        let customer_id = user
+            .stripe_customer_id
+            .as_deref()
+            .ok_or_else(|| ApiError::InvalidRequest("No Stripe customer linked".into()))?;
+
+        let customer = customer_id.parse::<stripe::CustomerId>()
+            .map_err(|e| ApiError::InternalError(anyhow::anyhow!("{}", e)))?;
+        let mut params = CreateBillingPortalSession::new(customer);
+        params.return_url = Some(return_url);
+
+        let session = stripe::BillingPortalSession::create(&self.stripe_client, params)
+            .await
+            .map_err(|e| ApiError::InternalError(anyhow::anyhow!("Stripe: {}", e)))?;
+
+        Ok(session.url.to_string())
+    }
+
+    /// Verify Stripe webhook signature and return the raw event payload (already parsed).
+    pub fn verify_webhook(&self, body: &[u8], signature: &str) -> Result<serde_json::Value, ApiError> {
+        let mut timestamp = "";
+        let mut expected_sig = "";
+        for part in signature.split(',') {
+            if part.starts_with("t=") {
+                timestamp = part.strip_prefix("t=").unwrap_or("");
+            } else if part.starts_with("v1=") {
+                expected_sig = part.strip_prefix("v1=").unwrap_or("");
+            }
+        }
+
+        if timestamp.is_empty() || expected_sig.is_empty() {
+            return Err(ApiError::InvalidRequest("Invalid Stripe signature format".into()));
+        }
+
+        let payload = format!("{}.{}", timestamp, std::str::from_utf8(body).map_err(|_| ApiError::InvalidRequest("Invalid body".into()))?);
+        let mut mac = HmacSha256::new_from_slice(self.stripe_config.webhook_secret.as_bytes())
+            .map_err(|_| ApiError::InternalError(anyhow::anyhow!("HMAC init failed")))?;
+        mac.update(payload.as_bytes());
+        let computed = mac.finalize().into_bytes();
+        let expected_bytes: Vec<u8> = hex::decode(expected_sig).map_err(|_| ApiError::InvalidRequest("Invalid signature format".into()))?;
+        if computed.len() != expected_bytes.len() || !bool::from(computed.as_slice().ct_eq(expected_bytes.as_slice())) {
+            return Err(ApiError::InvalidRequest("Webhook signature mismatch".into()));
+        }
+
+        serde_json::from_slice(body).map_err(|e| ApiError::InvalidRequest(anyhow::anyhow!("Invalid JSON: {}", e).to_string().into()))
+    }
+
+    /// Process a verified webhook event. Spawn in background in production.
+    pub async fn process_webhook_event(&self, event: &serde_json::Value) -> Result<(), ApiError> {
+        let event_type: String = event.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        info!("Processing Stripe webhook: {}", event_type);
+
+        match event_type.as_str() {
+            "checkout.session.completed" => self.handle_checkout_completed(event).await,
+            "customer.subscription.updated" => self.handle_subscription_updated(event).await,
+            "customer.subscription.deleted" => self.handle_subscription_deleted(event).await,
+            "invoice.payment_succeeded" | "invoice.payment_failed" => {
+                self.handle_invoice_event(event).await
+            }
+            "product.created" | "product.updated" | "product.deleted"
+            | "price.created" | "price.updated" | "price.deleted" => {
+                self.handle_product_price_event(event).await
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Extracts ID from Stripe object (handles both ID string and expanded object).
+    fn extract_id(obj: Option<&serde_json::Value>, key: &str) -> Option<String> {
+        let v = obj?.get(key)?;
+        v.as_str()
+            .map(String::from)
+            .or_else(|| v.get("id").and_then(|id| id.as_str()).map(String::from))
+    }
+
+    /// Extracts receipt URL from checkout session (invoice.hosted_invoice_url or charge.receipt_url when expanded).
+    fn extract_receipt_url(session: &serde_json::Value) -> Option<String> {
+        if let Some(inv) = session.get("invoice") {
+            if let Some(url) = inv.get("hosted_invoice_url").and_then(|v| v.as_str()) {
+                return Some(url.to_string());
+            }
+        }
+        if let Some(pi) = session.get("payment_intent") {
+            if let Some(charge) = pi.get("latest_charge") {
+                if let Some(url) = charge.get("receipt_url").and_then(|v| v.as_str()) {
+                    return Some(url.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    async fn handle_checkout_completed(&self, event: &serde_json::Value) -> Result<(), ApiError> {
+        let session = event
+            .get("data")
+            .and_then(|d| d.get("object"))
+            .ok_or_else(|| ApiError::InvalidRequest("Missing session object".into()))?;
+
+        let mode = session.get("mode").and_then(|m| m.as_str()).unwrap_or("");
+        let user_id_str = session
+            .get("client_reference_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ApiError::InvalidRequest("Missing client_reference_id".into()))?;
+        let user_id = UserId(uuid::Uuid::parse_str(user_id_str).map_err(|_| ApiError::InvalidRequest("Invalid user_id".into()))?);
+
+        let customer_id = Self::extract_id(Some(session), "customer")
+            .ok_or_else(|| ApiError::InvalidRequest("Missing customer".into()))?;
+
+        if mode == "subscription" {
+            let sub_id = Self::extract_id(Some(session), "subscription")
+                .ok_or_else(|| ApiError::InvalidRequest("Missing subscription".into()))?;
+
+            let line_items = session.get("line_items");
+            let price_id = line_items
+                .and_then(|li| li.get("data"))
+                .and_then(|d| d.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|first| first.get("price"))
+                .and_then(|p| p.as_str().or_else(|| p.get("id").and_then(|id| id.as_str())))
+                .unwrap_or("");
+            let plan = self.billing_repo.get_plan_by_stripe_price_id(price_id).await
+                .map_err(|e| ApiError::InternalError(e.into()))?;
+            let plan_id = plan.map(|p| p.id);
+
+            let subscription = match self.billing_repo.get_subscription_by_stripe_id(&sub_id).await
+                .map_err(|e| ApiError::InternalError(e.into()))?
+            {
+                Some(s) => s,
+                None => self
+                    .billing_repo
+                    .create_subscription(
+                        user_id,
+                        &customer_id,
+                        &sub_id,
+                        plan_id,
+                        "active",
+                        None,
+                        None,
+                    )
+                    .await
+                    .map_err(|e| ApiError::InternalError(e.into()))?,
+            };
+
+            let receipt_url = Self::extract_receipt_url(session);
+            self.billing_repo
+                .add_subscription_transaction(
+                    user_id,
+                    subscription.id,
+                    "created",
+                    None,
+                    None,
+                    None,
+                    receipt_url.as_deref(),
+                )
+                .await
+                .map_err(|e| ApiError::InternalError(e.into()))?;
+        } else if mode == "payment" {
+            let amount_total = session.get("amount_total").and_then(|a| a.as_i64()).unwrap_or(0);
+            let currency = session.get("currency").and_then(|c| c.as_str()).unwrap_or("usd");
+
+            let line_items = session.get("line_items");
+            let price_value = line_items
+                .and_then(|li| li.get("data"))
+                .and_then(|d| d.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|first| first.get("price"));
+            let price_id = price_value
+                .and_then(|p| p.as_str())
+                .or_else(|| price_value.and_then(|p| p.get("id").and_then(|id| id.as_str())))
+                .unwrap_or("");
+
+            let package = self.billing_repo.get_package_by_stripe_price_id(price_id).await
+                .map_err(|e| ApiError::InternalError(e.into()))?;
+
+            let (tokens, package_id) = package
+                .map(|p| (p.tokens, Some(p.id)))
+                .unwrap_or((0, None));
+
+            let receipt_url = Self::extract_receipt_url(session);
+
+            self.billing_repo
+                .add_credit_transaction(
+                    user_id,
+                    package_id,
+                    tokens,
+                    amount_total,
+                    currency,
+                    "purchase",
+                    None,
+                    None,
+                    receipt_url.as_deref(),
+                )
+                .await
+                .map_err(|e| ApiError::InternalError(e.into()))?;
+
+            if tokens > 0 {
+                self.billing_repo
+                    .upsert_user_credits(user_id, tokens)
+                    .await
+                    .map_err(|e| ApiError::InternalError(e.into()))?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn handle_subscription_updated(&self, _event: &serde_json::Value) -> Result<(), ApiError> {
+        Ok(())
+    }
+
+    async fn handle_subscription_deleted(&self, _event: &serde_json::Value) -> Result<(), ApiError> {
+        Ok(())
+    }
+
+    async fn handle_invoice_event(&self, _event: &serde_json::Value) -> Result<(), ApiError> {
+        Ok(())
+    }
+
+    async fn handle_product_price_event(&self, _event: &serde_json::Value) -> Result<(), ApiError> {
+        Ok(())
+    }
+}

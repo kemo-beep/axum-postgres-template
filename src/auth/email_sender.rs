@@ -12,6 +12,13 @@ pub trait EmailSender: Send + Sync {
         to: &'a str,
         code: &'a str,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send + 'a>>;
+
+    /// Sends a password reset link to the given email.
+    fn send_password_reset<'a>(
+        &'a self,
+        to: &'a str,
+        reset_link: &'a str,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send + 'a>>;
 }
 
 /// Logs emails to tracing instead of sending. Used when SMTP is not configured.
@@ -26,6 +33,17 @@ impl EmailSender for ConsoleEmailSender {
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send + 'a>> {
         Box::pin(async move {
             tracing::info!(to = %to, code = %code, "Would send login code email (SMTP not configured)");
+            Ok(())
+        })
+    }
+
+    fn send_password_reset<'a>(
+        &'a self,
+        to: &'a str,
+        reset_link: &'a str,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send + 'a>> {
+        Box::pin(async move {
+            tracing::info!(to = %to, reset_link = %reset_link, "Would send password reset email (SMTP not configured)");
             Ok(())
         })
     }
@@ -60,6 +78,40 @@ impl EmailSender for SmtpEmailSender {
                 .to(to.parse().map_err(|e: lettre::address::AddressError| anyhow::anyhow!("{}", e))?)
                 .subject("Your login code")
                 .body(format!("Your login code is: {}. It expires in 15 minutes.", code))?;
+
+            let creds = Credentials::new(config.user.clone(), config.password.clone());
+            let mailer =
+                AsyncSmtpTransport::<Tokio1Executor>::relay(&config.host)?
+                    .port(config.port)
+                    .credentials(creds)
+                    .build();
+
+            mailer.send(email).await?;
+            Ok(())
+        })
+    }
+
+    fn send_password_reset<'a>(
+        &'a self,
+        to: &'a str,
+        reset_link: &'a str,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send + 'a>> {
+        let config = self.config.clone();
+        let to = to.to_string();
+        let reset_link = reset_link.to_string();
+        Box::pin(async move {
+            use lettre::transport::smtp::authentication::Credentials;
+            use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
+
+            let body = format!(
+                "Click the link to reset your password: {}\n\nThe link expires in 1 hour.",
+                reset_link
+            );
+            let email = Message::builder()
+                .from(config.from.parse().map_err(|e: lettre::address::AddressError| anyhow::anyhow!("{}", e))?)
+                .to(to.parse().map_err(|e: lettre::address::AddressError| anyhow::anyhow!("{}", e))?)
+                .subject("Password reset")
+                .body(body)?;
 
             let creds = Credentials::new(config.user.clone(), config.password.clone());
             let mailer =

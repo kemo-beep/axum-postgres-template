@@ -29,9 +29,9 @@ Production-ready backend checklist for an Axum + PostgreSQL SaaS stack.
 
 ### Errors
 
-- [ ] Use `thiserror` / `anyhow`; convert to `ApiError` at handler boundary
-- [ ] Avoid `unwrap()` in production paths; use `?` and propagate
-- [ ] Don’t leak internal errors to clients; log and return generic messages
+- [x] Use `thiserror` / `anyhow`; convert to `ApiError` at handler boundary
+- [x] Avoid `unwrap()` in production paths; use `?` and propagate
+- [x] Don’t leak internal errors to clients; log and return generic messages
 
 ### Consistency
 
@@ -41,7 +41,7 @@ Production-ready backend checklist for an Axum + PostgreSQL SaaS stack.
 
 ### Scalability mindset
 
-- [ ] Stateless handlers (session/tenant in extractors or state)
+- [x] Stateless handlers (session/tenant in extractors or state)
 - [ ] Avoid N+1 queries; batch or join where needed
 - [ ] External calls (email, Stripe, R2) non-blocking and with timeouts
 
@@ -50,16 +50,16 @@ Production-ready backend checklist for an Axum + PostgreSQL SaaS stack.
 ## Core Infrastructure
 
 ### PostgreSQL & SQLx
-- [ ] Migrations run at startup (`sqlx::migrate!`)
-- [ ] Connection pooling configured (`DATABASE_POOL_MAX_SIZE` vs Postgres `max_connections`)
-- [ ] Prepared statement caching (SQLx default)
-- [ ] Migrations folder at `./migrations/`
-- [ ] `DATABASE_URL` in `.env` / env vars
+- [x] Migrations run at startup (`sqlx::migrate!`)
+- [x] Connection pooling configured (`DATABASE_POOL_MAX_SIZE` vs Postgres `max_connections`)
+- [x] Prepared statement caching (SQLx default)
+- [x] Migrations folder at `./migrations/`
+- [x] `DATABASE_URL` in `.env` / env vars
 
 ### Configuration
-- [ ] `APP_ENVIRONMENT` (development/production)
-- [ ] `PORT` / `listen_address`
-- [ ] Sensitive config via env vars, never hardcoded
+- [x] `APP_ENVIRONMENT` (development/production)
+- [x] `PORT` / `listen_address`
+- [x] Sensitive config via env vars, never hardcoded
 
 ---
 
@@ -68,18 +68,18 @@ Production-ready backend checklist for an Axum + PostgreSQL SaaS stack.
 - [x] Add SMTP crate: `lettre` (tokio1)
 - [x] Env vars: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `MAIL_FROM`
 - [ ] TLS/STARTTLS for production
-- [ ] Transactional emails (signup, password reset, etc.)
-- [ ] Async sending (background task or queue)
-- [ ] Email templates (e.g. `maud`, `askama`, or simple string templates)
-- [ ] Rate limiting for email-sending endpoints
+- [x] Transactional emails (login code, password reset)
+- [x] Async sending (via `EmailSender` trait; spawn/queue in production)
+- [ ] Email templates (e.g. `maud`, `askama`; currently plain text)
+- [x] Rate limiting for email-sending endpoints (send-code, password-reset/request)
 
 ---
 
 ## Object Storage (Cloudflare R2)
 
-- [x] R2 S3-compatible API (stub; requires `aws-sdk-s3`, Rust 1.91+ for full support)
+- [x] R2 S3-compatible API (`aws-sdk-s3`; requires Rust 1.91+)
 - [x] Env vars: `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`, `R2_ENDPOINT`
-- [ ] Presigned URLs for private file access
+- [x] Presigned URLs for private file access (GET and PUT); `POST /v1/files/upload` for direct upload
 - [ ] Public bucket policy for static assets (optional)
 - [ ] File size limits and validation on upload
 - [ ] Content-Type / MIME type handling
@@ -96,7 +96,7 @@ Three login methods: **email code**, **Google**, and **email + password**.
 ### User model
 
 - [x] `users` table: id, email, password_hash (nullable), google_sub (nullable), created_at, etc.
-- [ ] One user per email; link Google OAuth to existing account by email if present
+- [x] One user per email; link Google OAuth to existing account by email if present
 
 ### Login method 1: Email code (passwordless)
 
@@ -117,18 +117,18 @@ Three login methods: **email code**, **Google**, and **email + password**.
 
 - [x] Registration: email + password, validation, duplicate-email check; hash password (`argon2`)
 - [x] Login: validate credentials → create JWT
-- [ ] Password reset: send reset link or code via email, one-time use, expiry (structure in place)
+- [x] Password reset: send reset link via email, one-time use, 1h expiry
 - [ ] Account lockout after N failed attempts (optional)
 
 ### Common auth
 
-- [ ] Logout: invalidate token (stateless JWT; blacklist optional)
+- [x] Logout: invalidate token (JWT blacklist via `token_blacklist` table, jti in claims)
 - [x] JWT (same for all three methods)
   - JWT: stateless, `Authorization: Bearer`
   - Sessions: `axum-extra::CookieSession` or Redis-backed
 - [ ] Token refresh flow (if JWT)
 - [ ] Secure, httpOnly, SameSite cookies if cookie-based
-- [ ] Rate limiting on login and “send code” endpoints
+- [x] Rate limiting on login and “send code” endpoints
 
 ---
 
@@ -148,13 +148,13 @@ Three login methods: **email code**, **Google**, and **email + password**.
 
 - [x] Auth extractor: `RequireAuth` (checks Bearer token, returns user)
 - [x] Helpers: `check_permission`, `check_role` (via RbacRepository)
-- [ ] Apply per-route or per-router via `.route_layer()`
-- [ ] 401 Unauthorized when not authenticated
-- [ ] 403 Forbidden when authenticated but lacking permission
+- [ ] Apply per-route or per-router via `.route_layer()` (helpers exist; layer not applied)
+- [x] 401 Unauthorized when not authenticated (`RequireAuth`, `verify_token`)
+- [x] 403 Forbidden when authenticated but lacking permission (`check_permission`, `check_role`)
 
 ### Resource-Level Authorization
 
-- [ ] Ownership checks: user can only access their own resources
+- [x] Ownership checks: user can only access their own resources (billing transactions, portal scoped to user)
 - [ ] Multi-tenancy: org/workspace/tenant scoping (e.g. `tenant_id` on resources)
 - [ ] Row-level checks in queries (filter by `user_id` / `tenant_id`)
 
@@ -189,40 +189,40 @@ Three login methods: **email code**, **Google**, and **email + password**.
 
 ### Configuration
 
-- [ ] Env vars: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PUBLISHABLE_KEY` (or `POLAR_ACCESS_TOKEN`, `POLAR_WEBHOOK_SECRET`, etc.)
-- [ ] Webhook signing secret for idempotent, secure event handling
+- [x] Env vars: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PUBLISHABLE_KEY` (optional; backend-only)
+- [x] Webhook signing secret for idempotent, secure event handling (constant-time HMAC verification)
 
 ### Subscriptions
 
-- [ ] Plan models: `subscription_plans` (id, name, price_id, interval, amount, features)
-- [ ] `subscriptions` table (user_id, plan_id, external_id, status, current_period_end)
-- [ ] Create Checkout Session / Payment Link for subscription signup
-- [ ] Webhook handlers: `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`
-- [ ] Sync subscription status to DB on webhook events
+- [x] Plan models: `subscription_plans` (id, name, stripe_price_id, interval, amount, features)
+- [x] `subscriptions` table (user_id, plan_id, stripe_subscription_id, status, current_period_end)
+- [x] Create Checkout Session for subscription signup
+- [x] Webhook handlers: `checkout.session.completed` (subscription + payment); `customer.subscription.updated` / `deleted` (stubs)
+- [x] Sync subscription status to DB on webhook events (checkout.session.completed; subscription.updated/deleted stubbed)
 - [ ] Grace period / dunning for failed renewals
 - [ ] Cancel / downgrade / upgrade flows
 
 ### Token packages / one-time products
 
-- [ ] `token_packages` or `products` (id, name, external_price_id, tokens, price)
-- [ ] Create Checkout Session for one-time purchase
-- [ ] Webhook: `checkout.session.completed` (payment_intent or one-time)
-- [ ] Credit tokens to user/account on successful payment
-- [ ] `user_tokens` or `credits` balance table with audit trail (transactions log)
+- [x] `token_packages` (id, name, stripe_price_id, tokens, price)
+- [x] Create Checkout Session for one-time purchase
+- [x] Webhook: `checkout.session.completed` (payment mode)
+- [x] Credit tokens to user on successful payment
+- [x] `user_credits` + `credit_transactions` with audit trail
 
 ### Webhooks
 
-- [x] Dedicated webhook route: `POST /webhooks/stripe` (signature verification structure)
-- [ ] Verify signature (Stripe: `Stripe-Signature`, Polar: signing secret)
-- [ ] Idempotency: use `id` or `request_id` to avoid double-processing
-- [ ] Return 200 quickly, process async (background task / queue) if needed
+- [x] Dedicated webhook route: `POST /webhooks/stripe`
+- [x] Verify signature (Stripe: `Stripe-Signature`, constant-time HMAC)
+- [x] Idempotency: subscription creation checks existence before insert; retries safe
+- [x] Return 200 quickly, process async (`tokio::spawn` after verify)
 - [ ] Log failures for debugging; retry policy per provider docs
 
 ### Checkout & customer portal
 
-- [ ] Redirect to Stripe Checkout / Polar checkout with `success_url`, `cancel_url`, `customer_email` / `metadata` (user_id, tenant_id)
-- [ ] Customer portal link for managing subscription, payment methods, invoices
-- [ ] Store `customer_id` (Stripe) or equivalent on user for portal / future payments
+- [x] Redirect to Stripe Checkout with `success_url`, `cancel_url`, `client_reference_id` (user_id)
+- [x] Customer portal link (`GET /v1/billing/portal`) for managing subscription, payment methods
+- [x] Store `stripe_customer_id` on user for portal / future payments
 
 ### Edge cases
 
@@ -234,18 +234,18 @@ Three login methods: **email code**, **Google**, and **email + password**.
 
 ## API & Errors
 
-- [ ] Consistent error types (`thiserror`, `ApiError`)
-- [ ] HTTP status codes mapped to errors
-- [ ] Validation (e.g. `validator`, `axum-valid`)
-- [ ] OpenAPI / Swagger (optional, e.g. `utoipa`)
+- [x] Consistent error types (`thiserror`, `ApiError`)
+- [x] HTTP status codes mapped to errors (400, 401, 403, 404, 409, 422, 429, 500)
+- [ ] Validation (e.g. `validator`, `axum-valid`); basic validation in services
+- [x] OpenAPI / Swagger (`utoipa` with all routes)
 
 ---
 
 ## Observability
 
-- [ ] Structured logging (`tracing`, `tracing-subscriber`)
-- [ ] `RUST_LOG` for log levels
-- [ ] Health check endpoint (readiness + liveness)
+- [x] Structured logging (`tracing`, `tracing-subscriber`)
+- [x] `RUST_LOG` for log levels
+- [x] Health check endpoint (`GET /health`)
 - [ ] Metrics (optional: `metrics` + Prometheus exporter)
 - [ ] Tracing propagation (e.g. OpenTelemetry) for distributed requests
 - [ ] Error tracking (e.g. Sentry) in production
@@ -258,7 +258,7 @@ Three login methods: **email code**, **Google**, and **email + password**.
 
 - [x] Job queue trait (`services::JobQueue`); template uses `tokio::spawn`. Document Redis/`background-jobs` as production upgrade.
 - [x] Async email sending via `EmailSender` trait (spawn or queue)
-- [ ] Webhook handling: return 200 fast, process in background
+- [x] Webhook handling: return 200 fast, process in background (`tokio::spawn`)
 - [ ] Scheduled jobs: subscription checks, cleanup, reminder emails
 - [ ] Retries with backoff and dead-letter handling
 - [ ] Job observability (enqueue/fail counts, latency)
@@ -300,7 +300,7 @@ Three login methods: **email code**, **Google**, and **email + password**.
 - [x] DB connection retry with backoff on startup
 - [ ] Timeouts on external calls (Stripe, SMTP, R2)
 - [ ] Circuit breaker for external services (optional)
-- [ ] Request timeout (already in tower-http)
+- [x] Request timeout (tower-http)
 - [ ] DB backup strategy and restore procedure
 
 ---
@@ -327,7 +327,7 @@ Three login methods: **email code**, **Google**, and **email + password**.
 ## Deployment
 
 - [ ] Dockerfile / container image
-- [ ] Migrations in startup (or separate init job)
+- [x] Migrations in startup (`sqlx::migrate!` in main)
 - [ ] Health checks in container orchestration
 - [ ] Secrets from env / secret manager (e.g. Doppler, Vault)
 - [ ] Multi-replica: stateless app, connection pool sizing

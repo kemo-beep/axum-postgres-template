@@ -3,6 +3,7 @@
 use axum::{
     extract::{Query, State},
     extract::rejection::JsonRejection,
+    http::HeaderMap,
     response::Redirect,
     routing::{get, post},
     Json, Router,
@@ -40,6 +41,17 @@ pub struct LoginRequest {
     pub password: String,
 }
 
+#[derive(Deserialize, ToSchema)]
+pub struct PasswordResetRequest {
+    pub email: String,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct PasswordResetConfirmRequest {
+    pub token: String,
+    pub new_password: String,
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct AuthResponse {
     pub access_token: String,
@@ -62,7 +74,7 @@ impl From<User> for UserResponse {
 }
 
 #[derive(serde::Deserialize)]
-struct GoogleCallbackQuery {
+pub struct GoogleCallbackQuery {
     code: String,
     #[allow(dead_code)]
     state: Option<String>,
@@ -82,14 +94,17 @@ pub fn router() -> Router<AppState> {
         .route("/send-code", post(send_code))
         .route("/register", post(register))
         .route("/login", post(login))
+        .route("/password-reset/request", post(password_reset_request))
         .route_layer(GovernorLayer::new(auth_limit_conf));
 
     Router::new()
         .merge(rate_limited)
         .route("/verify-code", post(verify_code))
+        .route("/password-reset/confirm", post(password_reset_confirm))
         .route("/google", get(google_redirect))
         .route("/google/callback", get(google_callback))
         .route("/me", get(me))
+        .route("/logout", post(logout))
 }
 
 /// Send a 6-digit login code to the given email. Rate limited (5/min per IP).
@@ -278,6 +293,84 @@ pub async fn google_callback(
         access_token,
         token_type: "Bearer".to_string(),
     }))
+}
+
+/// Request a password reset email. Rate limited.
+#[utoipa::path(
+    post,
+    path = "/v1/auth/password-reset/request",
+    tag = "Auth",
+    request_body = PasswordResetRequest,
+    responses(
+        (status = 200, description = "If email exists, reset link sent", body = inline(serde_json::Value)),
+        (status = 429, description = "Too many requests", body = crate::api_error::ApiErrorResp),
+        (status = 500, description = "Internal error", body = crate::api_error::ApiErrorResp)
+    )
+)]
+pub async fn password_reset_request(
+    State(state): State<AppState>,
+    req: Result<Json<PasswordResetRequest>, JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(req) = req?;
+    let auth = state
+        .auth_service
+        .as_ref()
+        .ok_or(ApiError::InternalError(anyhow::anyhow!("Auth not configured")))?;
+    auth.password_reset_request(&req.email).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Confirm password reset with token from email link.
+#[utoipa::path(
+    post,
+    path = "/v1/auth/password-reset/confirm",
+    tag = "Auth",
+    request_body = PasswordResetConfirmRequest,
+    responses(
+        (status = 200, description = "Password reset", body = inline(serde_json::Value)),
+        (status = 400, description = "Invalid or expired token", body = crate::api_error::ApiErrorResp),
+        (status = 500, description = "Internal error", body = crate::api_error::ApiErrorResp)
+    )
+)]
+pub async fn password_reset_confirm(
+    State(state): State<AppState>,
+    req: Result<Json<PasswordResetConfirmRequest>, JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(req) = req?;
+    let auth = state
+        .auth_service
+        .as_ref()
+        .ok_or(ApiError::InternalError(anyhow::anyhow!("Auth not configured")))?;
+    auth.password_reset_confirm(&req.token, &req.new_password).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Logout (blacklist the current token). Requires Authorization: Bearer &lt;token&gt;.
+#[utoipa::path(
+    post,
+    path = "/v1/auth/logout",
+    tag = "Auth",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Logged out", body = inline(serde_json::Value)),
+        (status = 401, description = "Unauthorized", body = crate::api_error::ApiErrorResp)
+    )
+)]
+pub async fn logout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .ok_or(ApiError::Unauthorized)?;
+    let auth = state
+        .auth_service
+        .as_ref()
+        .ok_or(ApiError::InternalError(anyhow::anyhow!("Auth not configured")))?;
+    auth.logout(token).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 /// Get current user. Requires Authorization: Bearer &lt;token&gt;.

@@ -1,26 +1,26 @@
 -- Roles
-CREATE TABLE roles (
+CREATE TABLE IF NOT EXISTS roles (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL UNIQUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- Permissions (e.g. users:read, users:write, billing:manage)
-CREATE TABLE permissions (
+CREATE TABLE IF NOT EXISTS permissions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL UNIQUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- Role-Permission junction
-CREATE TABLE role_permissions (
+CREATE TABLE IF NOT EXISTS role_permissions (
     role_id UUID NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
     permission_id UUID NOT NULL REFERENCES permissions(id) ON DELETE CASCADE,
     PRIMARY KEY (role_id, permission_id)
 );
 
 -- User-Role assignment
-CREATE TABLE user_roles (
+CREATE TABLE IF NOT EXISTS user_roles (
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     role_id UUID NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -28,10 +28,10 @@ CREATE TABLE user_roles (
 );
 
 -- Seed default roles and permissions
-INSERT INTO roles (name) VALUES ('admin'), ('member'), ('viewer')
+INSERT INTO roles (id, name) VALUES (gen_random_uuid(), 'admin'), (gen_random_uuid(), 'member'), (gen_random_uuid(), 'viewer')
 ON CONFLICT (name) DO NOTHING;
 
-INSERT INTO permissions (name) VALUES ('users:read'), ('users:write'), ('billing:manage')
+INSERT INTO permissions (id, name) VALUES (gen_random_uuid(), 'users:read'), (gen_random_uuid(), 'users:write'), (gen_random_uuid(), 'billing:manage')
 ON CONFLICT (name) DO NOTHING;
 
 -- Admin gets all permissions; member gets users:read

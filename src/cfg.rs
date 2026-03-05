@@ -27,12 +27,12 @@ pub struct R2Config {
     pub endpoint: String,
 }
 
-/// Stripe configuration.
+/// Stripe configuration. Backend-only: publishable_key optional.
 #[derive(Clone, Debug)]
 pub struct StripeConfig {
     pub secret_key: String,
     pub webhook_secret: String,
-    pub publishable_key: String,
+    pub publishable_key: Option<String>,
 }
 
 /// Application configuration built from environment variables.
@@ -145,12 +145,11 @@ impl Configuration {
         let stripe = match (
             env_var_opt("STRIPE_SECRET_KEY"),
             env_var_opt("STRIPE_WEBHOOK_SECRET"),
-            env_var_opt("STRIPE_PUBLISHABLE_KEY"),
         ) {
-            (Some(secret_key), Some(webhook_secret), Some(publishable_key)) => Some(StripeConfig {
+            (Some(secret_key), Some(webhook_secret)) => Some(StripeConfig {
                 secret_key,
                 webhook_secret,
-                publishable_key,
+                publishable_key: env_var_opt("STRIPE_PUBLISHABLE_KEY"),
             }),
             _ => None,
         };
