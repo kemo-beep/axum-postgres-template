@@ -242,6 +242,106 @@ pub struct PortalQuery {
     return_url: Option<String>,
 }
 
+#[derive(Serialize, ToSchema)]
+pub struct SubscriptionStatusResponse {
+    pub plan_name: Option<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/billing/subscription-status",
+    tag = "Billing",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "User's subscription plan name, if subscribed"),
+        (status = 401, description = "Unauthorized", body = crate::common::ApiErrorResp),
+        (status = 500, description = "Billing not configured", body = crate::common::ApiErrorResp)
+    )
+)]
+pub async fn subscription_status(
+    State(state): State<AppState>,
+    RequireAuth(user): RequireAuth,
+) -> Result<Json<SubscriptionStatusResponse>, ApiError> {
+    let plan_name = match &state.billing_service {
+        Some(billing) => {
+            billing
+                .get_user_subscription_plan_name(user.id)
+                .await
+                .ok()
+                .flatten()
+        }
+        None => None,
+    };
+    Ok(Json(SubscriptionStatusResponse { plan_name }))
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct SubscriptionResponse {
+    pub id: String,
+    pub status: String,
+    pub current_period_end: Option<String>,
+    pub cancel_at_period_end: bool,
+    pub plan: Option<SubscriptionPlanResponse>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct SubscriptionPlanResponse {
+    pub id: String,
+    pub name: String,
+    pub stripe_price_id: String,
+    pub interval: String,
+    pub amount_cents: i64,
+    pub currency: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/orgs/{org_id}/billing/subscription",
+    tag = "Billing",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Org subscription with plan"),
+        (status = 404, description = "No active subscription"),
+        (status = 401, description = "Unauthorized", body = crate::common::ApiErrorResp),
+        (status = 403, description = "Forbidden", body = crate::common::ApiErrorResp),
+        (status = 500, description = "Billing not configured", body = crate::common::ApiErrorResp)
+    )
+)]
+pub async fn get_subscription(
+    State(state): State<AppState>,
+    RequireOrgBillingAccess(_user, org_id): RequireOrgBillingAccess,
+) -> Result<Json<SubscriptionResponse>, ApiError> {
+    let billing = state
+        .billing_service
+        .as_ref()
+        .ok_or(ApiError::InternalError(anyhow::anyhow!(
+            "Billing not configured"
+        )))?;
+
+    let Some((sub, plan)) = billing.get_subscription_by_org(org_id).await? else {
+        return Err(ApiError::NotFound);
+    };
+
+    let plan_resp = plan.map(|p| SubscriptionPlanResponse {
+        id: p.id.to_string(),
+        name: p.name,
+        stripe_price_id: p.stripe_price_id,
+        interval: p.interval,
+        amount_cents: p.amount_cents,
+        currency: p.currency,
+    });
+
+    Ok(Json(SubscriptionResponse {
+        id: sub.id.to_string(),
+        status: sub.status,
+        current_period_end: sub
+            .current_period_end
+            .map(|t| t.to_rfc3339()),
+        cancel_at_period_end: sub.cancel_at_period_end,
+        plan: plan_resp,
+    }))
+}
+
 #[utoipa::path(
     get,
     path = "/v1/orgs/{org_id}/billing/transactions",
@@ -368,10 +468,14 @@ pub fn billing_router(state: &AppState) -> Router<AppState> {
         .route_layer(from_extractor_with_state::<RequireBillingManage, _>(
             state.clone(),
         ));
+    let auth_only = Router::new()
+        .route("/subscription-status", get(subscription_status))
+        .route_layer(from_extractor_with_state::<RequireAuth, _>(state.clone()));
     Router::new()
         .route("/plans", get(list_plans))
         .route("/packages", get(list_packages))
         .merge(protected)
+        .merge(auth_only)
 }
 
 /// Org-scoped billing router: mount at /v1/orgs/:org_id/billing
@@ -382,6 +486,7 @@ pub fn org_billing_router(_state: &AppState) -> Router<AppState> {
         .route("/packages", get(list_packages))
         .route("/checkout", post(checkout))
         .route("/portal", get(org_portal))
+        .route("/subscription", get(get_subscription))
         .route("/transactions", get(transactions))
         .route("/subscription/cancel", post(subscription_cancel))
         .route("/subscription/change-plan", post(subscription_change_plan))

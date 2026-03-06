@@ -110,6 +110,25 @@ impl BillingRepository {
             .collect())
     }
 
+    /// Get the plan name of the user's highest-tier active subscription across their orgs.
+    pub async fn get_user_active_plan_name(&self, user_id: UserId) -> Result<Option<String>> {
+        let row = sqlx::query_scalar::<_, Option<String>>(
+            r#"
+            SELECT sp.name
+            FROM subscriptions s
+            JOIN org_members om ON s.org_id = om.org_id AND om.user_id = $1
+            JOIN subscription_plans sp ON s.plan_id = sp.id
+            WHERE s.status IN ('active', 'trialing', 'past_due', 'unpaid')
+            ORDER BY sp.amount_cents DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(user_id.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.flatten())
+    }
+
     pub async fn list_token_packages(&self) -> Result<Vec<TokenPackage>> {
         let rows = sqlx::query(
             "SELECT id, stripe_product_id, stripe_price_id, name, tokens, amount_cents, currency, active
@@ -130,6 +149,27 @@ impl BillingRepository {
                 active: r.get("active"),
             })
             .collect())
+    }
+
+    pub async fn get_plan_by_id(&self, plan_id: Uuid) -> Result<Option<SubscriptionPlan>> {
+        let row = sqlx::query(
+            "SELECT id, stripe_product_id, stripe_price_id, name, interval, amount_cents, currency, features, active
+             FROM subscription_plans WHERE id = $1 AND active = true",
+        )
+        .bind(plan_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r: sqlx::postgres::PgRow| SubscriptionPlan {
+            id: r.get("id"),
+            stripe_product_id: r.get("stripe_product_id"),
+            stripe_price_id: r.get("stripe_price_id"),
+            name: r.get("name"),
+            interval: r.get("interval"),
+            amount_cents: r.get("amount_cents"),
+            currency: r.get("currency"),
+            features: r.get("features"),
+            active: r.get("active"),
+        }))
     }
 
     pub async fn get_plan_by_stripe_price_id(

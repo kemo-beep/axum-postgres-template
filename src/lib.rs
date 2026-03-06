@@ -43,6 +43,8 @@ pub use db::*;
         billing::routes::list_packages,
         billing::routes::checkout,
         billing::routes::portal,
+        billing::routes::subscription_status,
+        billing::routes::get_subscription,
         billing::routes::transactions,
         billing::routes::subscription_cancel,
         billing::routes::subscription_change_plan,

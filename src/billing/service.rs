@@ -41,6 +41,18 @@ impl BillingService {
         self.billing_repo.list_token_packages().await
     }
 
+    /// Get the current user's subscription plan name (e.g. "Pro") if they have an active
+    /// subscription in any of their orgs. Returns the highest-tier plan.
+    pub async fn get_user_subscription_plan_name(
+        &self,
+        user_id: UserId,
+    ) -> Result<Option<String>, ApiError> {
+        self.billing_repo
+            .get_user_active_plan_name(user_id)
+            .await
+            .map_err(ApiError::InternalError)
+    }
+
     pub async fn list_transactions(
         &self,
         user_id: UserId,
@@ -54,6 +66,36 @@ impl BillingService {
             .await?;
         let credit = self.billing_repo.list_credit_transactions(user_id).await?;
         Ok((sub, credit))
+    }
+
+    /// Get org's active subscription with plan details. Returns None when no subscription.
+    pub async fn get_subscription_by_org(
+        &self,
+        org_id: OrgId,
+    ) -> Result<
+        Option<(
+            crate::billing::repository::Subscription,
+            Option<crate::billing::repository::SubscriptionPlan>,
+        )>,
+        ApiError,
+    > {
+        let sub = self
+            .billing_repo
+            .get_subscription_by_org(org_id)
+            .await
+            .map_err(ApiError::InternalError)?;
+        let Some(sub) = sub else {
+            return Ok(None);
+        };
+        let plan = match sub.plan_id {
+            Some(plan_id) => self
+                .billing_repo
+                .get_plan_by_id(plan_id)
+                .await
+                .map_err(ApiError::InternalError)?,
+            None => None,
+        };
+        Ok(Some((sub, plan)))
     }
 
     pub async fn list_transactions_by_org(
