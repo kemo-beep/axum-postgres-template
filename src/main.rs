@@ -25,7 +25,12 @@ async fn main() {
     db.migrate().await.expect("Failed to run migrations");
 
     // Spin up our server.
-    tracing::info!("Starting server on {}", cfg.listen_address);
+    tracing::info!(
+        "Server running on {} (port {}) | API: {}",
+        cfg.listen_address,
+        cfg.app_port,
+        cfg.base_url
+    );
     let listener = TcpListener::bind(&cfg.listen_address)
         .await
         .expect("Failed to bind address");

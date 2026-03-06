@@ -301,6 +301,74 @@ impl FromRequestParts<AppState> for RequireOrgMember {
     }
 }
 
+/// Extractor for org-scoped billing routes. Requires auth, org membership, and either
+/// the global `billing:manage` permission or org role `owner`/`admin`.
+/// Yields (User, OrgId).
+pub struct RequireOrgBillingAccess(pub User, pub OrgId);
+
+impl RequireOrgBillingAccess {
+    pub fn user(&self) -> &User {
+        &self.0
+    }
+    pub fn org_id(&self) -> OrgId {
+        self.1
+    }
+}
+
+impl FromRequestParts<AppState> for RequireOrgBillingAccess {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let user = RequireAuth::from_request_parts(parts, state).await?.0;
+        let Path(org_id_str): Path<String> = Path::from_request_parts(parts, state)
+            .await
+            .map_err(|_| ApiError::NotFound)?;
+        let org_uuid = Uuid::parse_str(&org_id_str).map_err(|_| ApiError::NotFound)?;
+        let org_id = OrgId::from_uuid(org_uuid);
+
+        if let Some(scope) = parts.extensions.get::<crate::auth::ApiKeyScope>() {
+            if let Some(key_org_id) = scope.org_id {
+                if key_org_id != org_id {
+                    return Err(ApiError::Forbidden);
+                }
+                if !scope.permissions.contains(&permissions::BILLING_MANAGE.to_string()) {
+                    return Err(ApiError::Forbidden);
+                }
+                return Ok(RequireOrgBillingAccess(user, org_id));
+            }
+        }
+
+        state
+            .org_service
+            .ensure_user_in_org(user.id, org_id)
+            .await?;
+
+        let has_permission = state
+            .rbac_service
+            .check_permission(user.id, permissions::BILLING_MANAGE)
+            .await
+            .is_ok();
+
+        if has_permission {
+            return Ok(RequireOrgBillingAccess(user, org_id));
+        }
+
+        let member_role = state
+            .org_service
+            .get_member_role(org_id, user.id)
+            .await?;
+
+        if member_role.as_deref().is_some_and(|r| r == "owner" || r == "admin") {
+            return Ok(RequireOrgBillingAccess(user, org_id));
+        }
+
+        Err(ApiError::Forbidden)
+    }
+}
+
 /// Extractor that requires auth and workspace access (user must be org member).
 /// Use on routes with path params `:org_id` and `:workspace_id`.
 pub struct RequireWorkspaceMember(pub User, pub OrgId, pub WorkspaceId);

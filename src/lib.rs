@@ -180,10 +180,12 @@ pub fn router(cfg: Config, db: Db, storage_service: Option<StorageService>) -> R
     let billing_service = cfg.stripe.as_ref().map(|stripe_cfg| {
         use crate::auth::repository::UserRepository;
         use crate::billing::repository::BillingRepository;
+        use crate::org::repository::OrgRepository;
 
         let billing_repo = BillingRepository::new(db.pool.clone());
         let user_repo = UserRepository::new(db.pool.clone());
-        BillingService::new(stripe_cfg.clone(), billing_repo, user_repo)
+        let org_repo = OrgRepository::new(db.pool.clone());
+        BillingService::new(stripe_cfg.clone(), billing_repo, user_repo, org_repo)
     });
 
     let org_service = {

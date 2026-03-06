@@ -113,6 +113,17 @@ impl OrgService {
         self.repo.ensure_user_in_org(user_id, org_id).await
     }
 
+    pub async fn get_member_role(
+        &self,
+        org_id: OrgId,
+        user_id: UserId,
+    ) -> Result<Option<String>, ApiError> {
+        self.repo
+            .get_member_role(org_id, user_id)
+            .await
+            .map_err(ApiError::InternalError)
+    }
+
     pub async fn ensure_workspace_access(
         &self,
         user_id: UserId,

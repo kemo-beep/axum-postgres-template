@@ -13,7 +13,7 @@ use utoipa::ToSchema;
 
 use axum::middleware::from_extractor_with_state;
 
-use crate::auth::extractor::{RequireAuth, RequireBillingManage, RequireOrgMember};
+use crate::auth::extractor::{RequireAuth, RequireBillingManage, RequireOrgBillingAccess};
 use crate::common::ApiError;
 use crate::AppState;
 
@@ -140,7 +140,7 @@ pub async fn list_packages(
 
 #[utoipa::path(
     post,
-    path = "/v1/billing/checkout",
+    path = "/v1/orgs/{org_id}/billing/checkout",
     tag = "Billing",
     request_body = CheckoutRequest,
     security(("bearer_auth" = [])),
@@ -154,7 +154,7 @@ pub async fn list_packages(
 )]
 pub async fn checkout(
     State(state): State<AppState>,
-    RequireOrgMember(user, org_id): RequireOrgMember,
+    RequireOrgBillingAccess(user, org_id): RequireOrgBillingAccess,
     req: Result<Json<CheckoutRequest>, JsonRejection>,
 ) -> Result<Json<UrlResponse>, ApiError> {
     let Json(req) = req?;
@@ -220,6 +220,23 @@ pub async fn portal(
     Ok(Json(UrlResponse { url }))
 }
 
+pub async fn org_portal(
+    State(state): State<AppState>,
+    RequireOrgBillingAccess(user, _org_id): RequireOrgBillingAccess,
+    Query(q): axum::extract::Query<PortalQuery>,
+) -> Result<Json<UrlResponse>, ApiError> {
+    let return_url = q.return_url.unwrap_or_else(|| state.cfg.base_url.clone());
+    let billing = state
+        .billing_service
+        .as_ref()
+        .ok_or(ApiError::InternalError(anyhow::anyhow!(
+            "Billing not configured"
+        )))?;
+
+    let url = billing.create_portal_session(user.id, &return_url).await?;
+    Ok(Json(UrlResponse { url }))
+}
+
 #[derive(Deserialize)]
 pub struct PortalQuery {
     return_url: Option<String>,
@@ -227,7 +244,7 @@ pub struct PortalQuery {
 
 #[utoipa::path(
     get,
-    path = "/v1/billing/transactions",
+    path = "/v1/orgs/{org_id}/billing/transactions",
     tag = "Billing",
     security(("bearer_auth" = [])),
     responses(
@@ -239,7 +256,7 @@ pub struct PortalQuery {
 )]
 pub async fn transactions(
     State(state): State<AppState>,
-    RequireOrgMember(_user, org_id): RequireOrgMember,
+    RequireOrgBillingAccess(_user, org_id): RequireOrgBillingAccess,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let billing = state
         .billing_service
@@ -281,7 +298,7 @@ pub struct ChangePlanRequest {
 )]
 pub async fn subscription_cancel(
     State(state): State<AppState>,
-    RequireOrgMember(user, org_id): RequireOrgMember,
+    RequireOrgBillingAccess(user, org_id): RequireOrgBillingAccess,
     Query(q): Query<CancelQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let billing = state
@@ -327,7 +344,7 @@ pub struct CancelQuery {
 )]
 pub async fn subscription_change_plan(
     State(state): State<AppState>,
-    RequireOrgMember(user, org_id): RequireOrgMember,
+    RequireOrgBillingAccess(user, org_id): RequireOrgBillingAccess,
     req: Result<Json<ChangePlanRequest>, JsonRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let Json(req) = req?;
@@ -347,9 +364,7 @@ pub async fn subscription_change_plan(
 
 pub fn billing_router(state: &AppState) -> Router<AppState> {
     let protected = Router::new()
-        .route("/checkout", post(checkout))
         .route("/portal", get(portal))
-        .route("/transactions", get(transactions))
         .route_layer(from_extractor_with_state::<RequireBillingManage, _>(
             state.clone(),
         ));
@@ -360,18 +375,14 @@ pub fn billing_router(state: &AppState) -> Router<AppState> {
 }
 
 /// Org-scoped billing router: mount at /v1/orgs/:org_id/billing
-pub fn org_billing_router(state: &AppState) -> Router<AppState> {
-    let protected = Router::new()
-        .route("/checkout", post(checkout))
-        .route("/portal", get(portal))
-        .route("/transactions", get(transactions))
-        .route("/subscription/cancel", post(subscription_cancel))
-        .route("/subscription/change-plan", post(subscription_change_plan))
-        .route_layer(from_extractor_with_state::<RequireBillingManage, _>(
-            state.clone(),
-        ));
+/// Uses RequireOrgBillingAccess: allows org owners/admins without global billing:manage.
+pub fn org_billing_router(_state: &AppState) -> Router<AppState> {
     Router::new()
         .route("/plans", get(list_plans))
         .route("/packages", get(list_packages))
-        .merge(protected)
+        .route("/checkout", post(checkout))
+        .route("/portal", get(org_portal))
+        .route("/transactions", get(transactions))
+        .route("/subscription/cancel", post(subscription_cancel))
+        .route("/subscription/change-plan", post(subscription_change_plan))
 }

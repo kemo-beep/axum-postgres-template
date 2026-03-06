@@ -7,8 +7,9 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use stripe::{
     CancelSubscription, CheckoutSession, CheckoutSessionMode, Client, CreateBillingPortalSession,
-    CreateCheckoutSession, CreateCheckoutSessionLineItems, CreateCustomer, Customer, Price, PriceId,
-    Product, Subscription, SubscriptionId, UpdateSubscription, UpdateSubscriptionItems,
+    CreateCheckoutSession, CreateCheckoutSessionLineItems, CreateCustomer, Customer, IdOrCreate,
+    ListPrices, Price, PriceId, Product, Subscription, SubscriptionId, UpdateSubscription,
+    UpdateSubscriptionItems,
 };
 use subtle::ConstantTimeEq;
 use tracing::{info, warn};
@@ -17,6 +18,7 @@ use crate::auth::repository::UserRepository;
 use crate::billing::repository::BillingRepository;
 use crate::cfg::StripeConfig;
 use crate::common::{ApiError, OrgId, UserId};
+use crate::org::repository::OrgRepository;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -27,6 +29,7 @@ pub struct BillingService {
     stripe_config: StripeConfig,
     billing_repo: BillingRepository,
     user_repo: UserRepository,
+    org_repo: OrgRepository,
 }
 
 impl BillingService {
@@ -75,6 +78,7 @@ impl BillingService {
         stripe_config: StripeConfig,
         billing_repo: BillingRepository,
         user_repo: UserRepository,
+        org_repo: OrgRepository,
     ) -> Self {
         let stripe_client = Client::new(stripe_config.secret_key.clone());
         Self {
@@ -82,6 +86,7 @@ impl BillingService {
             stripe_config,
             billing_repo,
             user_repo,
+            org_repo,
         }
     }
 
@@ -101,6 +106,46 @@ impl BillingService {
             .await
             .map_err(ApiError::InternalError)?
             .ok_or(ApiError::NotFound)?;
+
+        // When mode is subscription, ensure the price is a recurring subscription price.
+        if mode == CheckoutSessionMode::Subscription {
+            let plan = self
+                .billing_repo
+                .get_plan_by_stripe_price_id(price_id)
+                .await
+                .map_err(ApiError::InternalError)?;
+            if plan.is_none() {
+                return Err(ApiError::InvalidRequest(
+                    "Price must belong to a subscription plan".into(),
+                ));
+            }
+            let price_id_parsed = price_id
+                .parse::<PriceId>()
+                .map_err(|_| ApiError::InvalidRequest("Invalid price id".into()))?;
+            match Price::retrieve(&self.stripe_client, &price_id_parsed, &[]).await {
+                Ok(price) => {
+                    let is_recurring = price
+                        .type_
+                        .as_ref()
+                        .map(|t| t.to_string().as_str() == "recurring")
+                        .unwrap_or(false)
+                        || price.recurring.is_some();
+                    if !is_recurring {
+                        return Err(ApiError::InvalidRequest(
+                            "Subscription checkout requires a recurring price. \
+                             This plan may be a one-time purchase—check your Stripe configuration."
+                                .into(),
+                        ));
+                    }
+                }
+                Err(e) => {
+                    return Err(ApiError::InternalError(anyhow::anyhow!(
+                        "Stripe: failed to validate price: {}",
+                        e
+                    )))
+                }
+            }
+        }
 
         let client_ref = user_id.0.to_string();
         let mut params = CreateCheckoutSession::new();
@@ -444,14 +489,41 @@ impl BillingService {
             .ok_or_else(|| ApiError::InvalidRequest("Missing session object".into()))?;
 
         let mode = session.get("mode").and_then(|m| m.as_str()).unwrap_or("");
-        let user_id_str = session
-            .get("client_reference_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ApiError::InvalidRequest("Missing client_reference_id".into()))?;
-        let user_id = UserId(
-            uuid::Uuid::parse_str(user_id_str)
-                .map_err(|_| ApiError::InvalidRequest("Invalid user_id".into()))?,
-        );
+        let customer_id = Self::extract_id(Some(session), "customer")
+            .ok_or_else(|| ApiError::InvalidRequest("Missing customer".into()))?;
+
+        // Resolve user_id: from client_reference_id (our sessions) or from Stripe Customer metadata (Portal sessions).
+        let user_id = {
+            if let Some(cref) = session.get("client_reference_id").and_then(|v| v.as_str()) {
+                UserId(
+                    uuid::Uuid::parse_str(cref)
+                        .map_err(|_| ApiError::InvalidRequest("Invalid client_reference_id".into()))?,
+                )
+            } else {
+                // Portal-created sessions don't have client_reference_id; resolve from Customer metadata.
+                let customer_id_parsed = customer_id
+                    .parse::<stripe::CustomerId>()
+                    .map_err(|_| ApiError::InvalidRequest("Invalid customer id".into()))?;
+                let customer = Customer::retrieve(&self.stripe_client, &customer_id_parsed, &[])
+                    .await
+                    .map_err(|e| {
+                        ApiError::InternalError(anyhow::anyhow!("Stripe Customer retrieve: {}", e))
+                    })?;
+                let user_id_str = customer
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.get("user_id").map(|s| s.as_str()))
+                    .ok_or_else(|| {
+                        ApiError::InvalidRequest(
+                            "Session has no client_reference_id and Customer has no user_id metadata".into(),
+                        )
+                    })?;
+                UserId(
+                    uuid::Uuid::parse_str(user_id_str)
+                        .map_err(|_| ApiError::InvalidRequest("Invalid user_id in Customer metadata".into()))?,
+                )
+            }
+        };
 
         let org_id = session
             .get("metadata")
@@ -459,9 +531,6 @@ impl BillingService {
             .and_then(|v| v.as_str())
             .and_then(|s| uuid::Uuid::parse_str(s).ok())
             .map(OrgId::from_uuid);
-
-        let customer_id = Self::extract_id(Some(session), "customer")
-            .ok_or_else(|| ApiError::InvalidRequest("Missing customer".into()))?;
 
         if mode == "subscription" {
             let sub_id = Self::extract_id(Some(session), "subscription")
@@ -485,6 +554,25 @@ impl BillingService {
                 .map_err(ApiError::InternalError)?;
             let plan_id = plan.map(|p| p.id);
 
+            let org_for_create = match org_id {
+                Some(o) => o,
+                None => {
+                    let orgs = self
+                        .org_repo
+                        .get_user_orgs(user_id)
+                        .await
+                        .map_err(ApiError::InternalError)?;
+                    orgs.into_iter()
+                        .next()
+                        .map(|o| o.id)
+                        .ok_or_else(|| {
+                            ApiError::InvalidRequest(
+                                "Missing org_id in metadata and user has no org membership".into(),
+                            )
+                        })?
+                }
+            };
+
             let subscription = match self
                 .billing_repo
                 .get_subscription_by_stripe_id(&sub_id)
@@ -493,9 +581,7 @@ impl BillingService {
             {
                 Some(s) => s,
                 None => {
-                    let org = org_id.ok_or_else(|| {
-                        ApiError::InvalidRequest("Missing org_id in metadata".into())
-                    })?;
+                    let org = org_for_create;
                     self.billing_repo
                         .create_subscription(
                             user_id,
@@ -821,8 +907,32 @@ impl BillingService {
             }
         };
 
+        let is_deleted = event.get("type").and_then(|v| v.as_str()) == Some("price.deleted");
+        self.upsert_or_deactivate_price(&price, is_deleted).await
+    }
+
+    /// Upsert subscription plan or token package from a Stripe Price (with product expanded).
+    /// For product.updated events, we list all prices and call this for each—ensuring new prices get created.
+    async fn upsert_or_deactivate_price(
+        &self,
+        price: &Price,
+        force_deactivate: bool,
+    ) -> Result<(), ApiError> {
+        let price_id_str = price.id.as_str();
         let price_active = price.active.unwrap_or(true) && !price.deleted;
         let price_type = price.type_.as_ref().map(|t| t.to_string());
+
+        if force_deactivate || !price_active {
+            self.billing_repo
+                .deactivate_subscription_plan_by_price_id(price_id_str)
+                .await
+                .map_err(ApiError::InternalError)?;
+            self.billing_repo
+                .deactivate_token_package_by_price_id(price_id_str)
+                .await
+                .map_err(ApiError::InternalError)?;
+            return Ok(());
+        }
 
         let (product_id, product_name, product_active, metadata) = match &price.product {
             Some(stripe::Expandable::Object(product)) => {
@@ -863,20 +973,6 @@ impl BillingService {
                 return Ok(());
             }
         };
-
-        if event.get("type").and_then(|v| v.as_str()) == Some("price.deleted")
-            || !price_active
-        {
-            self.billing_repo
-                .deactivate_subscription_plan_by_price_id(price_id_str)
-                .await
-                .map_err(ApiError::InternalError)?;
-            self.billing_repo
-                .deactivate_token_package_by_price_id(price_id_str)
-                .await
-                .map_err(ApiError::InternalError)?;
-            return Ok(());
-        }
 
         let unit_amount = price.unit_amount;
         if unit_amount.is_none() {
@@ -976,36 +1072,37 @@ impl BillingService {
             return Ok(());
         }
 
-        let name = product_obj
-            .get("name")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("Unnamed")
-            .to_string();
+        // List all prices for this product and upsert each. This ensures product.updated
+        // creates/updates plans and packages even when no price.* webhook was received.
+        // Use "data.product" for list endpoints (Stripe rejects plain "product").
+        let mut list_params = ListPrices::new();
+        list_params.product = Some(IdOrCreate::Id(product_id));
+        list_params.expand = &["data.product"];
+        list_params.limit = Some(100);
 
-        let metadata = product_obj
-            .get("metadata")
-            .and_then(|m| m.as_object())
-            .map(|o| {
-                o.iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut prices = match Price::list(&self.stripe_client, &list_params).await {
+            Ok(list) => list.data,
+            Err(e) => {
+                warn!("Stripe Price list failed for product {}: {}", product_id, e);
+                return Ok(());
+            }
+        };
 
-        let features = Self::parse_features_from_metadata(&metadata);
-        let tokens = metadata
-            .get("tokens")
-            .and_then(|s| s.as_str().parse::<i64>().ok());
-
-        self.billing_repo
-            .update_subscription_plans_by_product_id(product_id, &name, &features, true)
-            .await
-            .map_err(ApiError::InternalError)?;
-        self.billing_repo
-            .update_token_packages_by_product_id(product_id, &name, tokens, true)
-            .await
-            .map_err(ApiError::InternalError)?;
+        while !prices.is_empty() {
+            for price in &prices {
+                if let Err(e) = self.upsert_or_deactivate_price(price, false).await {
+                    warn!("Failed to upsert price {}: {:?}", price.id, e);
+                }
+            }
+            list_params.starting_after = prices.last().map(|p| p.id.clone());
+            prices = match Price::list(&self.stripe_client, &list_params).await {
+                Ok(list) => list.data,
+                Err(e) => {
+                    warn!("Stripe Price list pagination failed: {}", e);
+                    break;
+                }
+            };
+        }
 
         Ok(())
     }
