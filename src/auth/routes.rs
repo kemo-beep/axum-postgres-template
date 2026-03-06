@@ -4,7 +4,7 @@ use axum::{
     extract::rejection::JsonRejection,
     extract::{Query, State},
     http::HeaderMap,
-    response::Redirect,
+    response::{IntoResponse, Redirect},
     routing::{get, post},
     Json, Router,
 };
@@ -320,7 +320,7 @@ pub async fn google_callback(
     State(state): State<AppState>,
     jar: CookieJar,
     Query(query): Query<GoogleCallbackQuery>,
-) -> Result<(CookieJar, Json<AuthResponse>), ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     let auth = state
         .auth_service
         .as_ref()
@@ -334,6 +334,13 @@ pub async fn google_callback(
     );
     let user = auth.login_google(&query.code, &redirect_uri).await?;
     let access_token = auth.create_access_token(user.id)?;
+
+    if let Some(ref frontend_url) = state.cfg.frontend_url {
+        let base = frontend_url.trim_end_matches('/');
+        let url = format!("{}/login?token={}", base, access_token);
+        return Ok(Redirect::temporary(&url).into_response());
+    }
+
     let cookie = build_auth_cookie(&access_token, &state.cfg);
     Ok((
         jar.add(cookie),
@@ -341,7 +348,8 @@ pub async fn google_callback(
             access_token,
             token_type: "Bearer".to_string(),
         }),
-    ))
+    )
+    .into_response())
 }
 
 /// Request a password reset email. Rate limited.

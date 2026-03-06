@@ -72,6 +72,8 @@ pub struct Configuration {
     pub google_client_secret: Option<String>,
     /// Base URL for OAuth redirect (e.g. https://api.example.com). Used to build redirect_uri.
     pub base_url: String,
+    /// Frontend app URL for OAuth callback redirect. When set, Google callback redirects here with ?token= instead of returning JSON.
+    pub frontend_url: Option<String>,
 
     /// Auth cookie name for browser-based auth. Default "session".
     pub cookie_name: String,
@@ -178,6 +180,7 @@ impl Configuration {
         let google_client_secret = env_var_opt("GOOGLE_CLIENT_SECRET");
         let base_url =
             env_var_opt("BASE_URL").unwrap_or_else(|| format!("http://localhost:{}", app_port));
+        let frontend_url = env_var_opt("FRONTEND_URL");
         let cookie_name = env_var_opt("COOKIE_NAME").unwrap_or_else(|| "session".to_string());
         let login_lockout_max_attempts = env_var_opt("LOGIN_LOCKOUT_MAX_ATTEMPTS")
             .and_then(|s| s.parse().ok())
@@ -201,6 +204,7 @@ impl Configuration {
             google_client_id,
             google_client_secret,
             base_url,
+            frontend_url,
             cookie_name,
             login_lockout_max_attempts,
             login_lockout_duration_minutes,
