@@ -34,6 +34,10 @@ pub struct Subscription {
     pub current_period_start: Option<DateTime<Utc>>,
     pub current_period_end: Option<DateTime<Utc>>,
     pub cancel_at_period_end: bool,
+    pub trial_start: Option<DateTime<Utc>>,
+    pub trial_end: Option<DateTime<Utc>>,
+    pub canceled_at: Option<DateTime<Utc>>,
+    pub latest_invoice_id: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -47,6 +51,12 @@ pub struct SubscriptionTransaction {
     pub amount_cents: Option<i64>,
     pub currency: Option<String>,
     pub receipt_url: Option<String>,
+    /// Stripe hosted invoice page URL (view in browser).
+    pub hosted_invoice_url: Option<String>,
+    /// Stripe invoice PDF download URL.
+    pub invoice_pdf_url: Option<String>,
+    /// Payment status: paid, failed, created, canceled, etc.
+    pub status: Option<String>,
     pub occurred_at: DateTime<Utc>,
 }
 
@@ -118,7 +128,7 @@ impl BillingRepository {
             FROM subscriptions s
             JOIN org_members om ON s.org_id = om.org_id AND om.user_id = $1
             JOIN subscription_plans sp ON s.plan_id = sp.id
-            WHERE s.status IN ('active', 'trialing', 'past_due', 'unpaid')
+            WHERE s.status IN ('active', 'trialing', 'past_due')
             ORDER BY sp.amount_cents DESC
             LIMIT 1
             "#,
@@ -236,10 +246,10 @@ impl BillingRepository {
         let row = sqlx::query(
             r#"
             INSERT INTO subscriptions (id, user_id, org_id, stripe_customer_id, stripe_subscription_id, plan_id, status,
-                current_period_start, current_period_end, cancel_at_period_end, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false, $10, $10)
+                current_period_start, current_period_end, cancel_at_period_end, trial_start, trial_end, canceled_at, latest_invoice_id, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false, NULL, NULL, NULL, NULL, $10, $10)
             RETURNING id, user_id, org_id, stripe_customer_id, stripe_subscription_id, plan_id, status,
-                current_period_start, current_period_end, cancel_at_period_end
+                current_period_start, current_period_end, cancel_at_period_end, trial_start, trial_end, canceled_at, latest_invoice_id
             "#,
         )
         .bind(id)
@@ -265,14 +275,18 @@ impl BillingRepository {
             current_period_start: row.get("current_period_start"),
             current_period_end: row.get("current_period_end"),
             cancel_at_period_end: row.get("cancel_at_period_end"),
+            trial_start: row.get("trial_start"),
+            trial_end: row.get("trial_end"),
+            canceled_at: row.get("canceled_at"),
+            latest_invoice_id: row.get("latest_invoice_id"),
         })
     }
 
     pub async fn get_subscription_by_org(&self, org_id: OrgId) -> Result<Option<Subscription>> {
         let row = sqlx::query(
             "SELECT id, user_id, org_id, stripe_customer_id, stripe_subscription_id, plan_id, status,
-                    current_period_start, current_period_end, cancel_at_period_end
-             FROM subscriptions WHERE org_id = $1 AND status IN ('active', 'trialing', 'past_due', 'unpaid') ORDER BY created_at DESC LIMIT 1",
+                    current_period_start, current_period_end, cancel_at_period_end, trial_start, trial_end, canceled_at, latest_invoice_id
+             FROM subscriptions WHERE org_id = $1 AND status IN ('active', 'trialing', 'past_due') ORDER BY created_at DESC LIMIT 1",
         )
         .bind(org_id.0)
         .fetch_optional(&self.pool)
@@ -288,6 +302,10 @@ impl BillingRepository {
             current_period_start: r.get("current_period_start"),
             current_period_end: r.get("current_period_end"),
             cancel_at_period_end: r.get("cancel_at_period_end"),
+            trial_start: r.get("trial_start"),
+            trial_end: r.get("trial_end"),
+            canceled_at: r.get("canceled_at"),
+            latest_invoice_id: r.get("latest_invoice_id"),
         }))
     }
 
@@ -314,7 +332,7 @@ impl BillingRepository {
     ) -> Result<Option<Subscription>> {
         let row = sqlx::query(
             "SELECT id, user_id, org_id, stripe_customer_id, stripe_subscription_id, plan_id, status,
-                    current_period_start, current_period_end, cancel_at_period_end
+                    current_period_start, current_period_end, cancel_at_period_end, trial_start, trial_end, canceled_at, latest_invoice_id
              FROM subscriptions WHERE stripe_subscription_id = $1",
         )
         .bind(stripe_subscription_id)
@@ -331,9 +349,14 @@ impl BillingRepository {
             current_period_start: r.get("current_period_start"),
             current_period_end: r.get("current_period_end"),
             cancel_at_period_end: r.get("cancel_at_period_end"),
+            trial_start: r.get("trial_start"),
+            trial_end: r.get("trial_end"),
+            canceled_at: r.get("canceled_at"),
+            latest_invoice_id: r.get("latest_invoice_id"),
         }))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_subscription_status(
         &self,
         stripe_subscription_id: &str,
@@ -341,21 +364,53 @@ impl BillingRepository {
         current_period_start: Option<DateTime<Utc>>,
         current_period_end: Option<DateTime<Utc>>,
         cancel_at_period_end: bool,
+        trial_start: Option<DateTime<Utc>>,
+        trial_end: Option<DateTime<Utc>>,
+        canceled_at: Option<DateTime<Utc>>,
+        latest_invoice_id: Option<&str>,
     ) -> Result<()> {
         let now = Utc::now();
+        let canceled_at = canceled_at.or(if status == "canceled" { Some(now) } else { None });
         sqlx::query(
-            "UPDATE subscriptions SET status = $1, current_period_start = $2, current_period_end = $3,
-             cancel_at_period_end = $4, updated_at = $5 WHERE stripe_subscription_id = $6",
+            r#"
+            UPDATE subscriptions SET status = $1, current_period_start = $2, current_period_end = $3,
+             cancel_at_period_end = $4, trial_start = COALESCE($5, trial_start), trial_end = COALESCE($6, trial_end),
+             canceled_at = COALESCE($7, canceled_at), latest_invoice_id = COALESCE($8, latest_invoice_id),
+             updated_at = $9 WHERE stripe_subscription_id = $10
+            "#,
         )
         .bind(status)
         .bind(current_period_start)
         .bind(current_period_end)
         .bind(cancel_at_period_end)
+        .bind(trial_start)
+        .bind(trial_end)
+        .bind(canceled_at)
+        .bind(latest_invoice_id)
         .bind(now)
         .bind(stripe_subscription_id)
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Reconcile subscriptions that should be canceled (cancel_at_period_end and period ended).
+    /// Safety net when webhooks are missed. Run hourly via background job.
+    pub async fn reconcile_stale_cancel_at_period_end(&self) -> Result<u64> {
+        let now = Utc::now();
+        let result = sqlx::query(
+            r#"
+            UPDATE subscriptions
+            SET status = 'canceled', canceled_at = $1, updated_at = $1
+            WHERE cancel_at_period_end = true
+              AND current_period_end < $1
+              AND status IN ('active', 'trialing', 'past_due', 'unpaid')
+            "#,
+        )
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -369,12 +424,16 @@ impl BillingRepository {
         amount_cents: Option<i64>,
         currency: Option<&str>,
         receipt_url: Option<&str>,
+        hosted_invoice_url: Option<&str>,
+        invoice_pdf_url: Option<&str>,
+        status: Option<&str>,
     ) -> Result<Uuid> {
         let id = Uuid::now_v7();
         let now = Utc::now();
         sqlx::query(
             "INSERT INTO subscription_transactions (id, user_id, org_id, subscription_id, event_type, stripe_invoice_id,
-             amount_cents, currency, receipt_url, occurred_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+             amount_cents, currency, receipt_url, hosted_invoice_url, invoice_pdf_url, status, occurred_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         )
         .bind(id)
         .bind(user_id.0)
@@ -385,6 +444,9 @@ impl BillingRepository {
         .bind(amount_cents)
         .bind(currency)
         .bind(receipt_url)
+        .bind(hosted_invoice_url)
+        .bind(invoice_pdf_url)
+        .bind(status)
         .bind(now)
         .execute(&self.pool)
         .await?;
@@ -465,7 +527,8 @@ impl BillingRepository {
         user_id: UserId,
     ) -> Result<Vec<SubscriptionTransaction>> {
         let rows = sqlx::query(
-            "SELECT id, user_id, org_id, subscription_id, event_type, stripe_invoice_id, amount_cents, currency, receipt_url, occurred_at
+            "SELECT id, user_id, org_id, subscription_id, event_type, stripe_invoice_id, amount_cents, currency,
+             receipt_url, hosted_invoice_url, invoice_pdf_url, status, occurred_at
              FROM subscription_transactions WHERE user_id = $1 ORDER BY occurred_at DESC",
         )
         .bind(user_id.0)
@@ -483,6 +546,9 @@ impl BillingRepository {
                 amount_cents: r.get("amount_cents"),
                 currency: r.get("currency"),
                 receipt_url: r.get("receipt_url"),
+                hosted_invoice_url: r.get("hosted_invoice_url"),
+                invoice_pdf_url: r.get("invoice_pdf_url"),
+                status: r.get("status"),
                 occurred_at: r.get("occurred_at"),
             })
             .collect())
@@ -493,7 +559,8 @@ impl BillingRepository {
         org_id: OrgId,
     ) -> Result<Vec<SubscriptionTransaction>> {
         let rows = sqlx::query(
-            "SELECT id, user_id, org_id, subscription_id, event_type, stripe_invoice_id, amount_cents, currency, receipt_url, occurred_at
+            "SELECT id, user_id, org_id, subscription_id, event_type, stripe_invoice_id, amount_cents, currency,
+             receipt_url, hosted_invoice_url, invoice_pdf_url, status, occurred_at
              FROM subscription_transactions WHERE org_id = $1 ORDER BY occurred_at DESC",
         )
         .bind(org_id.0)
@@ -511,6 +578,9 @@ impl BillingRepository {
                 amount_cents: r.get("amount_cents"),
                 currency: r.get("currency"),
                 receipt_url: r.get("receipt_url"),
+                hosted_invoice_url: r.get("hosted_invoice_url"),
+                invoice_pdf_url: r.get("invoice_pdf_url"),
+                status: r.get("status"),
                 occurred_at: r.get("occurred_at"),
             })
             .collect())

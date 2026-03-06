@@ -7,9 +7,9 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use stripe::{
     CancelSubscription, CheckoutSession, CheckoutSessionMode, Client, CreateBillingPortalSession,
-    CreateCheckoutSession, CreateCheckoutSessionLineItems, CreateCustomer, Customer, IdOrCreate,
-    ListPrices, Price, PriceId, Product, Subscription, SubscriptionId, UpdateSubscription,
-    UpdateSubscriptionItems,
+    CreateCheckoutSession, CreateCheckoutSessionLineItems, CreateCheckoutSessionSubscriptionData,
+    CreateCustomer, Customer, IdOrCreate, ListPrices, Price, PriceId, Product, Subscription,
+    SubscriptionId, UpdateSubscription, UpdateSubscriptionItems,
 };
 use subtle::ConstantTimeEq;
 use tracing::{info, warn};
@@ -39,6 +39,14 @@ impl BillingService {
 
     pub async fn list_packages(&self) -> Result<Vec<crate::billing::repository::TokenPackage>> {
         self.billing_repo.list_token_packages().await
+    }
+
+    /// Reconcile subscriptions that should be canceled (cancel_at_period_end + period ended).
+    /// Call periodically (e.g. hourly) as a fallback when webhooks are missed.
+    pub async fn reconcile_stale_cancel_at_period_end(&self) -> Result<u64> {
+        self.billing_repo
+            .reconcile_stale_cancel_at_period_end()
+            .await
     }
 
     /// Get the current user's subscription plan name (e.g. "Pro") if they have an active
@@ -204,6 +212,13 @@ impl BillingService {
             quantity: Some(1),
             ..Default::default()
         }]);
+
+        if mode == CheckoutSessionMode::Subscription {
+            params.subscription_data = Some(CreateCheckoutSessionSubscriptionData {
+                trial_period_days: Some(3),
+                ..Default::default()
+            });
+        }
 
         let customer_id = if let Some(ref cid) = user.stripe_customer_id {
             Some(
@@ -486,6 +501,11 @@ impl BillingService {
             .to_string();
         info!("Processing Stripe webhook: {}", event_type);
 
+        // Log full event for debugging field mapping (remove or reduce in production)
+        if let Ok(pretty) = serde_json::to_string_pretty(event) {
+            info!("Stripe webhook payload:\n{}", pretty);
+        }
+
         match event_type.as_str() {
             "checkout.session.completed" => self.handle_checkout_completed(event).await,
             "customer.subscription.updated" => self.handle_subscription_updated(event).await,
@@ -522,6 +542,16 @@ impl BillingService {
             }
         }
         None
+    }
+
+    /// Extracts hosted_invoice_url and invoice_pdf from a Stripe invoice object.
+    fn extract_invoice_urls(inv: &serde_json::Value) -> (Option<String>, Option<String>) {
+        let hosted = inv
+            .get("hosted_invoice_url")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let pdf = inv.get("invoice_pdf").and_then(|v| v.as_str()).map(String::from);
+        (hosted, pdf)
     }
 
     async fn handle_checkout_completed(&self, event: &serde_json::Value) -> Result<(), ApiError> {
@@ -624,7 +654,8 @@ impl BillingService {
                 Some(s) => s,
                 None => {
                     let org = org_for_create;
-                    self.billing_repo
+                    let sub = self
+                        .billing_repo
                         .create_subscription(
                             user_id,
                             org,
@@ -636,11 +667,68 @@ impl BillingService {
                             None,
                         )
                         .await
-                        .map_err(ApiError::InternalError)?
+                        .map_err(ApiError::InternalError)?;
+
+                    // Fetch Stripe subscription and sync period, trial, status, etc. immediately
+                    if let Ok(parsed) = sub_id.parse::<SubscriptionId>() {
+                        if let Ok(stripe_sub) =
+                            Subscription::retrieve(&self.stripe_client, &parsed, &[]).await
+                        {
+                            let sub_json = serde_json::to_value(&stripe_sub).ok();
+                            if let Some(obj) = sub_json.as_ref() {
+                                let status = obj
+                                    .get("status")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("active");
+                                let cancel_at_period_end = obj
+                                    .get("cancel_at_period_end")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(false);
+                                let period_start = obj
+                                    .get("current_period_start")
+                                    .and_then(|v| v.as_i64())
+                                    .and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single());
+                                let period_end = obj
+                                    .get("current_period_end")
+                                    .and_then(|v| v.as_i64())
+                                    .and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single());
+                                let trial_start = obj
+                                    .get("trial_start")
+                                    .and_then(|v| v.as_i64())
+                                    .and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single());
+                                let trial_end = obj
+                                    .get("trial_end")
+                                    .and_then(|v| v.as_i64())
+                                    .and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single());
+                                let latest_invoice_id = obj
+                                    .get("latest_invoice")
+                                    .and_then(|v| v.as_str().map(String::from))
+                                    .or_else(|| Self::extract_id(obj.get("latest_invoice"), "id"));
+
+                                let _ = self
+                                    .billing_repo
+                                    .update_subscription_status(
+                                        &sub_id,
+                                        status,
+                                        period_start,
+                                        period_end,
+                                        cancel_at_period_end,
+                                        trial_start,
+                                        trial_end,
+                                        None,
+                                        latest_invoice_id.as_deref(),
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
+
+                    sub
                 }
             };
 
             let receipt_url = Self::extract_receipt_url(session);
+            let hosted = receipt_url.clone();
             self.billing_repo
                 .add_subscription_transaction(
                     user_id,
@@ -651,6 +739,9 @@ impl BillingService {
                     None,
                     None,
                     receipt_url.as_deref(),
+                    hosted.as_deref(),
+                    None,
+                    Some("created"),
                 )
                 .await
                 .map_err(ApiError::InternalError)?;
@@ -754,6 +845,23 @@ impl BillingService {
             .get("current_period_end")
             .and_then(|v| v.as_i64())
             .and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single());
+        let trial_start = sub
+            .get("trial_start")
+            .and_then(|v| v.as_i64())
+            .and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single());
+        let trial_end = sub
+            .get("trial_end")
+            .and_then(|v| v.as_i64())
+            .and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single());
+        let latest_invoice_id = sub
+            .get("latest_invoice")
+            .and_then(|v| v.as_str().map(String::from))
+            .or_else(|| Self::extract_id(sub.get("latest_invoice"), "id"));
+        let canceled_at = if status == "canceled" {
+            Some(chrono::Utc::now())
+        } else {
+            None
+        };
 
         self.billing_repo
             .update_subscription_status(
@@ -762,6 +870,10 @@ impl BillingService {
                 period_start,
                 period_end,
                 cancel_at_period_end,
+                trial_start,
+                trial_end,
+                canceled_at,
+                latest_invoice_id.as_deref(),
             )
             .await
             .map_err(ApiError::InternalError)?;
@@ -814,7 +926,17 @@ impl BillingService {
             .map_err(ApiError::InternalError)?
         {
             self.billing_repo
-                .update_subscription_status(&stripe_id, "canceled", None, None, false)
+                .update_subscription_status(
+                    &stripe_id,
+                    "canceled",
+                    None,
+                    None,
+                    false,
+                    None,
+                    None,
+                    Some(chrono::Utc::now()),
+                    None,
+                )
                 .await
                 .map_err(ApiError::InternalError)?;
 
@@ -828,6 +950,9 @@ impl BillingService {
                     None,
                     None,
                     None,
+                    None,
+                    None,
+                    Some("canceled"),
                 )
                 .await
                 .map_err(ApiError::InternalError)?;
@@ -853,10 +978,7 @@ impl BillingService {
             .get("currency")
             .and_then(|v| v.as_str())
             .map(String::from);
-        let hosted_url = inv
-            .get("hosted_invoice_url")
-            .and_then(|v| v.as_str())
-            .map(String::from);
+        let (hosted_url, invoice_pdf_url) = Self::extract_invoice_urls(inv);
 
         let Some(stripe_sub_id) = sub_id else {
             return Ok(());
@@ -884,6 +1006,9 @@ impl BillingService {
                         amount_paid,
                         currency.as_deref(),
                         hosted_url.as_deref(),
+                        hosted_url.as_deref(),
+                        invoice_pdf_url.as_deref(),
+                        Some("paid"),
                     )
                     .await
                     .map_err(ApiError::InternalError)?;
@@ -899,6 +1024,9 @@ impl BillingService {
                         inv.get("amount_due").and_then(|v| v.as_i64()),
                         currency.as_deref(),
                         hosted_url.as_deref(),
+                        hosted_url.as_deref(),
+                        invoice_pdf_url.as_deref(),
+                        Some("failed"),
                     )
                     .await
                     .map_err(ApiError::InternalError)?;

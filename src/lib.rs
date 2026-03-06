@@ -229,6 +229,29 @@ pub fn router(cfg: Config, db: Db, storage_service: Option<StorageService>) -> R
         rbac_service,
     };
 
+    // Background job: reconcile subscriptions that should be canceled (cancel_at_period_end + period ended).
+    // Fallback when webhooks are missed. Runs hourly.
+    if let Some(billing) = app_state.billing_service.as_ref() {
+        let billing = billing.clone();
+        tokio::spawn(async move {
+            use std::time::Duration;
+            let mut interval = tokio::time::interval(Duration::from_secs(3600));
+            interval.tick().await; // skip first immediate tick
+            loop {
+                interval.tick().await;
+                match billing.reconcile_stale_cancel_at_period_end().await {
+                    Ok(n) if n > 0 => {
+                        tracing::info!(count = n, "Subscription reconciliation: marked stale subscriptions as canceled");
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!("Subscription reconciliation failed: {:?}", e);
+                    }
+                }
+            }
+        });
+    }
+
     // Middleware that adds high level tracing to a Service.
     // Trace comes with good defaults but also supports customizing many aspects of the output:
     // https://docs.rs/tower-http/latest/tower_http/trace/index.html

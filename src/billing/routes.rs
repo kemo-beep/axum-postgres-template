@@ -281,6 +281,9 @@ pub struct SubscriptionResponse {
     pub status: String,
     pub current_period_end: Option<String>,
     pub cancel_at_period_end: bool,
+    pub trial_start: Option<String>,
+    pub trial_end: Option<String>,
+    pub canceled_at: Option<String>,
     pub plan: Option<SubscriptionPlanResponse>,
 }
 
@@ -337,6 +340,9 @@ pub async fn get_subscription(
         current_period_end: sub
             .current_period_end
             .map(|t| t.to_rfc3339()),
+        trial_start: sub.trial_start.map(|t| t.to_rfc3339()),
+        trial_end: sub.trial_end.map(|t| t.to_rfc3339()),
+        canceled_at: sub.canceled_at.map(|t| t.to_rfc3339()),
         cancel_at_period_end: sub.cancel_at_period_end,
         plan: plan_resp,
     }))
