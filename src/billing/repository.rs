@@ -621,4 +621,105 @@ impl BillingRepository {
             .await?;
         Ok(())
     }
+
+    pub async fn deactivate_subscription_plan_by_price_id(
+        &self,
+        stripe_price_id: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE subscription_plans SET active = false, updated_at = now() WHERE stripe_price_id = $1",
+        )
+        .bind(stripe_price_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn deactivate_token_package_by_price_id(
+        &self,
+        stripe_price_id: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE token_packages SET active = false, updated_at = now() WHERE stripe_price_id = $1",
+        )
+        .bind(stripe_price_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn deactivate_subscription_plans_by_product_id(
+        &self,
+        stripe_product_id: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE subscription_plans SET active = false, updated_at = now() WHERE stripe_product_id = $1",
+        )
+        .bind(stripe_product_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn deactivate_token_packages_by_product_id(
+        &self,
+        stripe_product_id: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE token_packages SET active = false, updated_at = now() WHERE stripe_product_id = $1",
+        )
+        .bind(stripe_product_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn update_subscription_plans_by_product_id(
+        &self,
+        stripe_product_id: &str,
+        name: &str,
+        features: &serde_json::Value,
+        active: bool,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE subscription_plans SET name = $2, features = $3, active = $4, updated_at = now() WHERE stripe_product_id = $1",
+        )
+        .bind(stripe_product_id)
+        .bind(name)
+        .bind(features)
+        .bind(active)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn update_token_packages_by_product_id(
+        &self,
+        stripe_product_id: &str,
+        name: &str,
+        tokens: Option<i64>,
+        active: bool,
+    ) -> Result<()> {
+        if let Some(t) = tokens {
+            sqlx::query(
+                "UPDATE token_packages SET name = $2, tokens = $3, active = $4, updated_at = now() WHERE stripe_product_id = $1",
+            )
+            .bind(stripe_product_id)
+            .bind(name)
+            .bind(t)
+            .bind(active)
+            .execute(&self.pool)
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE token_packages SET name = $2, active = $3, updated_at = now() WHERE stripe_product_id = $1",
+            )
+            .bind(stripe_product_id)
+            .bind(name)
+            .bind(active)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
 }

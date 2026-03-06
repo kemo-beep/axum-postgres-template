@@ -7,8 +7,8 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use stripe::{
     CancelSubscription, CheckoutSession, CheckoutSessionMode, Client, CreateBillingPortalSession,
-    CreateCheckoutSession, CreateCheckoutSessionLineItems, CreateCustomer, Customer, Subscription,
-    SubscriptionId, UpdateSubscription, UpdateSubscriptionItems,
+    CreateCheckoutSession, CreateCheckoutSessionLineItems, CreateCustomer, Customer, Price, PriceId,
+    Product, Subscription, SubscriptionId, UpdateSubscription, UpdateSubscriptionItems,
 };
 use subtle::ConstantTimeEq;
 use tracing::{info, warn};
@@ -787,7 +787,233 @@ impl BillingService {
         Ok(())
     }
 
-    async fn handle_product_price_event(&self, _event: &serde_json::Value) -> Result<(), ApiError> {
+    async fn handle_product_price_event(&self, event: &serde_json::Value) -> Result<(), ApiError> {
+        let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match event_type {
+            "price.created" | "price.updated" | "price.deleted" => self.handle_price_event(event).await,
+            "product.created" | "product.updated" | "product.deleted" => {
+                self.handle_product_event(event).await
+            }
+            _ => Ok(()),
+        }
+    }
+
+    async fn handle_price_event(&self, event: &serde_json::Value) -> Result<(), ApiError> {
+        let price_obj = event
+            .get("data")
+            .and_then(|d| d.get("object"))
+            .ok_or_else(|| ApiError::InvalidRequest("Missing price object".into()))?;
+
+        let price_id_str = price_obj
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ApiError::InvalidRequest("Missing price id".into()))?;
+
+        let price_id = price_id_str
+            .parse::<PriceId>()
+            .map_err(|_| ApiError::InvalidRequest("Invalid price id".into()))?;
+
+        let price = match Price::retrieve(&self.stripe_client, &price_id, &["product"]).await {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("Stripe Price retrieve failed ({}): {}", price_id_str, e);
+                return Ok(());
+            }
+        };
+
+        let price_active = price.active.unwrap_or(true) && !price.deleted;
+        let price_type = price.type_.as_ref().map(|t| t.to_string());
+
+        let (product_id, product_name, product_active, metadata) = match &price.product {
+            Some(stripe::Expandable::Object(product)) => {
+                let name = product
+                    .name
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("Unnamed")
+                    .to_string();
+                let meta = product.metadata.as_ref().cloned().unwrap_or_default();
+                (product.id.to_string(), name, product.active.unwrap_or(true) && !product.deleted, meta)
+            }
+            Some(stripe::Expandable::Id(pid)) => {
+                match Product::retrieve(&self.stripe_client, pid, &[]).await {
+                    Ok(product) => {
+                        let name = product
+                            .name
+                            .as_deref()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or("Unnamed")
+                            .to_string();
+                        let meta = product.metadata.as_ref().cloned().unwrap_or_default();
+                        (
+                            product.id.to_string(),
+                            name,
+                            product.active.unwrap_or(true) && !product.deleted,
+                            meta,
+                        )
+                    }
+                    Err(e) => {
+                        warn!("Stripe Product retrieve failed ({}): {}", pid, e);
+                        return Ok(());
+                    }
+                }
+            }
+            None => {
+                warn!("Price {} has no product", price_id_str);
+                return Ok(());
+            }
+        };
+
+        if event.get("type").and_then(|v| v.as_str()) == Some("price.deleted")
+            || !price_active
+        {
+            self.billing_repo
+                .deactivate_subscription_plan_by_price_id(price_id_str)
+                .await
+                .map_err(ApiError::InternalError)?;
+            self.billing_repo
+                .deactivate_token_package_by_price_id(price_id_str)
+                .await
+                .map_err(ApiError::InternalError)?;
+            return Ok(());
+        }
+
+        let unit_amount = price.unit_amount;
+        if unit_amount.is_none() {
+            warn!("Skipping tiered/metered price {}", price_id_str);
+            return Ok(());
+        }
+        let amount_cents = unit_amount.unwrap();
+        let currency = price
+            .currency
+            .as_ref()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "usd".to_string());
+
+        match price_type.as_deref() {
+            Some("recurring") => {
+                let interval = price
+                    .recurring
+                    .as_ref()
+                    .map(|r| r.interval.to_string())
+                    .unwrap_or_else(|| "month".to_string());
+                let features = Self::parse_features_from_metadata(&metadata);
+                let active = product_active && price_active;
+                self.billing_repo
+                    .upsert_subscription_plan(
+                        &product_id,
+                        price_id_str,
+                        &product_name,
+                        &interval,
+                        amount_cents,
+                        &currency,
+                        &features,
+                        active,
+                    )
+                    .await
+                    .map_err(ApiError::InternalError)?;
+            }
+            Some("one_time") => {
+                let tokens = metadata
+                    .get("tokens")
+                    .and_then(|s| s.parse::<i64>().ok());
+                match tokens {
+                    Some(t) => {
+                        let active = product_active && price_active;
+                        self.billing_repo
+                            .upsert_token_package(
+                                &product_id,
+                                price_id_str,
+                                &product_name,
+                                t,
+                                amount_cents,
+                                &currency,
+                                active,
+                            )
+                            .await
+                            .map_err(ApiError::InternalError)?;
+                    }
+                    None => {
+                        warn!("Skipping one-time price {}: missing metadata.tokens", price_id_str);
+                    }
+                }
+            }
+            _ => {
+                warn!("Unsupported price type for {}: {:?}", price_id_str, price_type);
+            }
+        }
+
         Ok(())
+    }
+
+    async fn handle_product_event(&self, event: &serde_json::Value) -> Result<(), ApiError> {
+        let product_obj = event
+            .get("data")
+            .and_then(|d| d.get("object"))
+            .ok_or_else(|| ApiError::InvalidRequest("Missing product object".into()))?;
+
+        let product_id = product_obj
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ApiError::InvalidRequest("Missing product id".into()))?;
+
+        let active = product_obj
+            .get("active")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let deleted = product_obj.get("deleted").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        if event.get("type").and_then(|v| v.as_str()) == Some("product.deleted") || !active || deleted
+        {
+            self.billing_repo
+                .deactivate_subscription_plans_by_product_id(product_id)
+                .await
+                .map_err(ApiError::InternalError)?;
+            self.billing_repo
+                .deactivate_token_packages_by_product_id(product_id)
+                .await
+                .map_err(ApiError::InternalError)?;
+            return Ok(());
+        }
+
+        let name = product_obj
+            .get("name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("Unnamed")
+            .to_string();
+
+        let metadata = product_obj
+            .get("metadata")
+            .and_then(|m| m.as_object())
+            .map(|o| {
+                o.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let features = Self::parse_features_from_metadata(&metadata);
+        let tokens = metadata
+            .get("tokens")
+            .and_then(|s| s.as_str().parse::<i64>().ok());
+
+        self.billing_repo
+            .update_subscription_plans_by_product_id(product_id, &name, &features, true)
+            .await
+            .map_err(ApiError::InternalError)?;
+        self.billing_repo
+            .update_token_packages_by_product_id(product_id, &name, tokens, true)
+            .await
+            .map_err(ApiError::InternalError)?;
+
+        Ok(())
+    }
+
+    fn parse_features_from_metadata(metadata: &std::collections::HashMap<String, String>) -> serde_json::Value {
+        metadata
+            .get("features")
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_else(|| serde_json::json!([]))
     }
 }
