@@ -279,11 +279,14 @@ pub async fn subscription_status(
 pub struct SubscriptionResponse {
     pub id: String,
     pub status: String,
+    pub current_period_start: Option<String>,
     pub current_period_end: Option<String>,
     pub cancel_at_period_end: bool,
     pub trial_start: Option<String>,
     pub trial_end: Option<String>,
     pub canceled_at: Option<String>,
+    pub last_payment_at: Option<String>,
+    pub paused_at: Option<String>,
     pub plan: Option<SubscriptionPlanResponse>,
 }
 
@@ -337,13 +340,14 @@ pub async fn get_subscription(
     Ok(Json(SubscriptionResponse {
         id: sub.id.to_string(),
         status: sub.status,
-        current_period_end: sub
-            .current_period_end
-            .map(|t| t.to_rfc3339()),
+        current_period_start: sub.current_period_start.map(|t| t.to_rfc3339()),
+        current_period_end: sub.current_period_end.map(|t| t.to_rfc3339()),
+        cancel_at_period_end: sub.cancel_at_period_end,
         trial_start: sub.trial_start.map(|t| t.to_rfc3339()),
         trial_end: sub.trial_end.map(|t| t.to_rfc3339()),
         canceled_at: sub.canceled_at.map(|t| t.to_rfc3339()),
-        cancel_at_period_end: sub.cancel_at_period_end,
+        last_payment_at: sub.last_payment_at.map(|t| t.to_rfc3339()),
+        paused_at: sub.paused_at.map(|t| t.to_rfc3339()),
         plan: plan_resp,
     }))
 }

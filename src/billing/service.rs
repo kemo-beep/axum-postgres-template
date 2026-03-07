@@ -11,6 +11,7 @@ use stripe::{
     CreateCustomer, Customer, IdOrCreate, ListPrices, Price, PriceId, Product, Subscription,
     SubscriptionId, UpdateSubscription, UpdateSubscriptionItems,
 };
+use stripe::RetrieveCheckoutSessionLineItems;
 use subtle::ConstantTimeEq;
 use tracing::{info, warn};
 
@@ -214,10 +215,15 @@ impl BillingService {
         }]);
 
         if mode == CheckoutSessionMode::Subscription {
-            params.subscription_data = Some(CreateCheckoutSessionSubscriptionData {
+            let mut sub_data = CreateCheckoutSessionSubscriptionData {
                 trial_period_days: Some(3),
                 ..Default::default()
-            });
+            };
+            sub_data.metadata = Some(std::collections::HashMap::from([
+                ("user_id".to_string(), user_id.0.to_string()),
+                ("org_id".to_string(), org_id.0.to_string()),
+            ]));
+            params.subscription_data = Some(sub_data);
         }
 
         let customer_id = if let Some(ref cid) = user.stripe_customer_id {
@@ -508,6 +514,7 @@ impl BillingService {
 
         match event_type.as_str() {
             "checkout.session.completed" => self.handle_checkout_completed(event).await,
+            "customer.subscription.created" => self.handle_subscription_created(event).await,
             "customer.subscription.updated" => self.handle_subscription_updated(event).await,
             "customer.subscription.deleted" => self.handle_subscription_deleted(event).await,
             "invoice.payment_succeeded" | "invoice.payment_failed" => {
@@ -608,20 +615,40 @@ impl BillingService {
             let sub_id = Self::extract_id(Some(session), "subscription")
                 .ok_or_else(|| ApiError::InvalidRequest("Missing subscription".into()))?;
 
-            let line_items = session.get("line_items");
-            let price_id = line_items
+            // Webhooks don't include line_items by default; fetch via API when empty
+            let mut price_id = session
+                .get("line_items")
                 .and_then(|li| li.get("data"))
                 .and_then(|d| d.as_array())
                 .and_then(|arr| arr.first())
                 .and_then(|first| first.get("price"))
                 .and_then(|p| {
                     p.as_str()
-                        .or_else(|| p.get("id").and_then(|id| id.as_str()))
+                        .map(String::from)
+                        .or_else(|| p.get("id").and_then(|id| id.as_str()).map(String::from))
                 })
-                .unwrap_or("");
+                .unwrap_or_default();
+
+            if price_id.is_empty() {
+                if let Some(session_id) = session.get("id").and_then(|v| v.as_str()) {
+                    if let Ok(parsed) = session_id.parse::<stripe::CheckoutSessionId>() {
+                        let params = RetrieveCheckoutSessionLineItems::default();
+                        if let Ok(list) =
+                            CheckoutSession::retrieve_line_items(&self.stripe_client, &parsed, &params).await
+                        {
+                            if let Some(first) = list.data.first() {
+                                if let Some(ref price) = first.price {
+                                    price_id = price.id.as_str().to_string();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             let plan = self
                 .billing_repo
-                .get_plan_by_stripe_price_id(price_id)
+                .get_plan_by_stripe_price_id(&price_id)
                 .await
                 .map_err(ApiError::InternalError)?;
             let plan_id = plan.map(|p| p.id);
@@ -717,6 +744,8 @@ impl BillingService {
                                         trial_end,
                                         None,
                                         latest_invoice_id.as_deref(),
+                                        None,
+                                        None,
                                     )
                                     .await;
                             }
@@ -806,6 +835,196 @@ impl BillingService {
         Ok(())
     }
 
+    async fn handle_subscription_created(&self, event: &serde_json::Value) -> Result<(), ApiError> {
+        let sub = event
+            .get("data")
+            .and_then(|d| d.get("object"))
+            .ok_or_else(|| ApiError::InvalidRequest("Missing subscription object".into()))?;
+
+        let stripe_id = Self::extract_id(Some(sub), "id")
+            .ok_or_else(|| ApiError::InvalidRequest("Missing subscription id".into()))?;
+
+        let db_sub = match self
+            .billing_repo
+            .get_subscription_by_stripe_id(&stripe_id)
+            .await
+            .map_err(ApiError::InternalError)?
+        {
+            Some(s) => s,
+            None => {
+                // Subscription not in DB yet (created may fire before checkout.session.completed)
+                let customer_id = Self::extract_id(Some(sub), "customer")
+                    .ok_or_else(|| ApiError::InvalidRequest("Missing customer".into()))?;
+                let customer_id_parsed = customer_id
+                    .parse::<stripe::CustomerId>()
+                    .map_err(|_| ApiError::InvalidRequest("Invalid customer id".into()))?;
+                let customer = Customer::retrieve(&self.stripe_client, &customer_id_parsed, &[])
+                    .await
+                    .map_err(|e| ApiError::InternalError(anyhow::anyhow!("Stripe Customer retrieve: {}", e)))?;
+                let user_id_str = customer
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.get("user_id").map(|s| s.as_str()))
+                    .ok_or_else(|| ApiError::InvalidRequest("Customer has no user_id metadata".into()))?;
+                let user_id = UserId(
+                    uuid::Uuid::parse_str(user_id_str)
+                        .map_err(|_| ApiError::InvalidRequest("Invalid user_id in Customer metadata".into()))?,
+                );
+                let org_id = sub
+                    .get("metadata")
+                    .and_then(|m| m.get("org_id"))
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                    .map(OrgId::from_uuid)
+                    .or_else(|| None);
+                let org_id = match org_id {
+                    Some(o) => o,
+                    None => {
+                        let orgs = self
+                            .org_repo
+                            .get_user_orgs(user_id)
+                            .await
+                            .map_err(ApiError::InternalError)?;
+                        orgs.into_iter()
+                            .next()
+                            .map(|o| o.id)
+                            .ok_or_else(|| ApiError::InvalidRequest("User has no org membership".into()))?
+                    }
+                };
+                let plan_id = if let Some(items) = sub.get("items").and_then(|i| i.get("data")).and_then(|d| d.as_array()) {
+                    if let Some(first) = items.first() {
+                        let price_id = first
+                            .get("price")
+                            .and_then(|p| p.as_str().map(String::from).or_else(|| p.get("id").and_then(|id| id.as_str()).map(String::from)));
+                        if let Some(ref pid) = price_id {
+                            self.billing_repo
+                                .get_plan_by_stripe_price_id(pid)
+                                .await
+                                .ok()
+                                .flatten()
+                                .map(|p| p.id)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let status = sub.get("status").and_then(|v| v.as_str()).unwrap_or("active");
+                self.billing_repo
+                    .create_subscription(
+                        user_id,
+                        org_id,
+                        &customer_id,
+                        &stripe_id,
+                        plan_id,
+                        status,
+                        None,
+                        None,
+                    )
+                    .await
+                    .map_err(ApiError::InternalError)?;
+                // Fall through to update logic - we'll sync full data
+                self.billing_repo
+                    .get_subscription_by_stripe_id(&stripe_id)
+                    .await
+                    .map_err(ApiError::InternalError)?
+                    .ok_or_else(|| ApiError::InternalError(anyhow::anyhow!("Just created sub not found")))?
+            }
+        };
+
+        let status = sub
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let cancel_at_period_end = sub
+            .get("cancel_at_period_end")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let period_start = sub
+            .get("current_period_start")
+            .and_then(|v| v.as_i64())
+            .and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single());
+        let period_end = sub
+            .get("current_period_end")
+            .and_then(|v| v.as_i64())
+            .and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single());
+        let trial_start = sub
+            .get("trial_start")
+            .and_then(|v| v.as_i64())
+            .and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single());
+        let trial_end = sub
+            .get("trial_end")
+            .and_then(|v| v.as_i64())
+            .and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single());
+        let latest_invoice_id = sub
+            .get("latest_invoice")
+            .and_then(|v| v.as_str().map(String::from))
+            .or_else(|| Self::extract_id(sub.get("latest_invoice"), "id"));
+        let canceled_at = if status == "canceled" {
+            Some(chrono::Utc::now())
+        } else {
+            None
+        };
+
+            let paused_at = if status == "paused" {
+                Some(chrono::Utc::now())
+            } else {
+                None
+            };
+
+            self.billing_repo
+                .update_subscription_status(
+                    &stripe_id,
+                    status,
+                    period_start,
+                    period_end,
+                    cancel_at_period_end,
+                    trial_start,
+                    trial_end,
+                    canceled_at,
+                    latest_invoice_id.as_deref(),
+                    None,
+                    paused_at,
+                )
+                .await
+                .map_err(ApiError::InternalError)?;
+
+        // Sync plan_id if items changed (upgrade/downgrade)
+        if let Some(items) = sub
+            .get("items")
+            .and_then(|i| i.get("data"))
+            .and_then(|d| d.as_array())
+        {
+            if let Some(first) = items.first() {
+                let price = first.get("price").and_then(|p| {
+                    p.as_str()
+                        .map(String::from)
+                        .or_else(|| p.get("id").and_then(|id| id.as_str()).map(String::from))
+                });
+                if let Some(price_id) = price {
+                    if let Ok(Some(plan)) = self
+                        .billing_repo
+                        .get_plan_by_stripe_price_id(&price_id)
+                        .await
+                    {
+                        if db_sub.plan_id != Some(plan.id) {
+                            self.billing_repo
+                                .update_subscription_plan(&stripe_id, plan.id)
+                                .await
+                                .map_err(ApiError::InternalError)?;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     async fn handle_subscription_updated(&self, event: &serde_json::Value) -> Result<(), ApiError> {
         let sub = event
             .get("data")
@@ -863,6 +1082,12 @@ impl BillingService {
             None
         };
 
+        let paused_at = if status == "paused" {
+            Some(chrono::Utc::now())
+        } else {
+            None
+        };
+
         self.billing_repo
             .update_subscription_status(
                 &stripe_id,
@@ -874,6 +1099,8 @@ impl BillingService {
                 trial_end,
                 canceled_at,
                 latest_invoice_id.as_deref(),
+                None,
+                paused_at,
             )
             .await
             .map_err(ApiError::InternalError)?;
@@ -935,6 +1162,8 @@ impl BillingService {
                     None,
                     None,
                     Some(chrono::Utc::now()),
+                    None,
+                    None,
                     None,
                 )
                 .await
@@ -1012,6 +1241,23 @@ impl BillingService {
                     )
                     .await
                     .map_err(ApiError::InternalError)?;
+
+                let paid_at = inv
+                    .get("status_transitions")
+                    .and_then(|st| st.get("paid_at"))
+                    .and_then(|v| v.as_i64())
+                    .and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single())
+                    .or_else(|| {
+                        inv.get("created")
+                            .and_then(|v| v.as_i64())
+                            .and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single())
+                    });
+                if let Some(paid_at) = paid_at {
+                    let _ = self
+                        .billing_repo
+                        .update_subscription_last_payment(&stripe_sub_id, paid_at)
+                        .await;
+                }
             }
             "invoice.payment_failed" => {
                 self.billing_repo

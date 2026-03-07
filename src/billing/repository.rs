@@ -38,6 +38,8 @@ pub struct Subscription {
     pub trial_end: Option<DateTime<Utc>>,
     pub canceled_at: Option<DateTime<Utc>>,
     pub latest_invoice_id: Option<String>,
+    pub last_payment_at: Option<DateTime<Utc>>,
+    pub paused_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -249,7 +251,7 @@ impl BillingRepository {
                 current_period_start, current_period_end, cancel_at_period_end, trial_start, trial_end, canceled_at, latest_invoice_id, created_at, updated_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false, NULL, NULL, NULL, NULL, $10, $10)
             RETURNING id, user_id, org_id, stripe_customer_id, stripe_subscription_id, plan_id, status,
-                current_period_start, current_period_end, cancel_at_period_end, trial_start, trial_end, canceled_at, latest_invoice_id
+                current_period_start, current_period_end, cancel_at_period_end, trial_start, trial_end, canceled_at, latest_invoice_id, last_payment_at, paused_at
             "#,
         )
         .bind(id)
@@ -279,13 +281,15 @@ impl BillingRepository {
             trial_end: row.get("trial_end"),
             canceled_at: row.get("canceled_at"),
             latest_invoice_id: row.get("latest_invoice_id"),
+            last_payment_at: row.get("last_payment_at"),
+            paused_at: row.get("paused_at"),
         })
     }
 
     pub async fn get_subscription_by_org(&self, org_id: OrgId) -> Result<Option<Subscription>> {
         let row = sqlx::query(
             "SELECT id, user_id, org_id, stripe_customer_id, stripe_subscription_id, plan_id, status,
-                    current_period_start, current_period_end, cancel_at_period_end, trial_start, trial_end, canceled_at, latest_invoice_id
+                    current_period_start, current_period_end, cancel_at_period_end, trial_start, trial_end, canceled_at, latest_invoice_id, last_payment_at, paused_at
              FROM subscriptions WHERE org_id = $1 AND status IN ('active', 'trialing', 'past_due') ORDER BY created_at DESC LIMIT 1",
         )
         .bind(org_id.0)
@@ -306,6 +310,8 @@ impl BillingRepository {
             trial_end: r.get("trial_end"),
             canceled_at: r.get("canceled_at"),
             latest_invoice_id: r.get("latest_invoice_id"),
+            last_payment_at: r.get("last_payment_at"),
+            paused_at: r.get("paused_at"),
         }))
     }
 
@@ -332,7 +338,7 @@ impl BillingRepository {
     ) -> Result<Option<Subscription>> {
         let row = sqlx::query(
             "SELECT id, user_id, org_id, stripe_customer_id, stripe_subscription_id, plan_id, status,
-                    current_period_start, current_period_end, cancel_at_period_end, trial_start, trial_end, canceled_at, latest_invoice_id
+                    current_period_start, current_period_end, cancel_at_period_end, trial_start, trial_end, canceled_at, latest_invoice_id, last_payment_at, paused_at
              FROM subscriptions WHERE stripe_subscription_id = $1",
         )
         .bind(stripe_subscription_id)
@@ -353,6 +359,8 @@ impl BillingRepository {
             trial_end: r.get("trial_end"),
             canceled_at: r.get("canceled_at"),
             latest_invoice_id: r.get("latest_invoice_id"),
+            last_payment_at: r.get("last_payment_at"),
+            paused_at: r.get("paused_at"),
         }))
     }
 
@@ -368,6 +376,8 @@ impl BillingRepository {
         trial_end: Option<DateTime<Utc>>,
         canceled_at: Option<DateTime<Utc>>,
         latest_invoice_id: Option<&str>,
+        last_payment_at: Option<DateTime<Utc>>,
+        paused_at: Option<DateTime<Utc>>,
     ) -> Result<()> {
         let now = Utc::now();
         let canceled_at = canceled_at.or(if status == "canceled" { Some(now) } else { None });
@@ -376,7 +386,8 @@ impl BillingRepository {
             UPDATE subscriptions SET status = $1, current_period_start = $2, current_period_end = $3,
              cancel_at_period_end = $4, trial_start = COALESCE($5, trial_start), trial_end = COALESCE($6, trial_end),
              canceled_at = COALESCE($7, canceled_at), latest_invoice_id = COALESCE($8, latest_invoice_id),
-             updated_at = $9 WHERE stripe_subscription_id = $10
+             last_payment_at = COALESCE($9, last_payment_at), paused_at = $10, updated_at = $11
+             WHERE stripe_subscription_id = $12
             "#,
         )
         .bind(status)
@@ -387,6 +398,25 @@ impl BillingRepository {
         .bind(trial_end)
         .bind(canceled_at)
         .bind(latest_invoice_id)
+        .bind(last_payment_at)
+        .bind(paused_at)
+        .bind(now)
+        .bind(stripe_subscription_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn update_subscription_last_payment(
+        &self,
+        stripe_subscription_id: &str,
+        last_payment_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let now = Utc::now();
+        sqlx::query(
+            "UPDATE subscriptions SET last_payment_at = $1, updated_at = $2 WHERE stripe_subscription_id = $3",
+        )
+        .bind(last_payment_at)
         .bind(now)
         .bind(stripe_subscription_id)
         .execute(&self.pool)
