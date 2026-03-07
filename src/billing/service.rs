@@ -758,6 +758,12 @@ impl BillingService {
 
             let receipt_url = Self::extract_receipt_url(session);
             let hosted = receipt_url.clone();
+            let billing_email = session
+                .get("customer_details")
+                .and_then(|cd| cd.get("email"))
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .or_else(|| session.get("customer_email").and_then(|v| v.as_str()).map(String::from));
             self.billing_repo
                 .add_subscription_transaction(
                     user_id,
@@ -771,6 +777,7 @@ impl BillingService {
                     hosted.as_deref(),
                     None,
                     Some("created"),
+                    billing_email.as_deref(),
                 )
                 .await
                 .map_err(ApiError::InternalError)?;
@@ -1182,6 +1189,7 @@ impl BillingService {
                     None,
                     None,
                     Some("canceled"),
+                    None,
                 )
                 .await
                 .map_err(ApiError::InternalError)?;
@@ -1223,6 +1231,8 @@ impl BillingService {
             None => return Ok(()),
         };
 
+        let billing_email = inv.get("customer_email").and_then(|v| v.as_str()).map(String::from);
+
         match event_type {
             "invoice.payment_succeeded" => {
                 self.billing_repo
@@ -1238,6 +1248,7 @@ impl BillingService {
                         hosted_url.as_deref(),
                         invoice_pdf_url.as_deref(),
                         Some("paid"),
+                        billing_email.as_deref(),
                     )
                     .await
                     .map_err(ApiError::InternalError)?;
@@ -1273,6 +1284,7 @@ impl BillingService {
                         hosted_url.as_deref(),
                         invoice_pdf_url.as_deref(),
                         Some("failed"),
+                        billing_email.as_deref(),
                     )
                     .await
                     .map_err(ApiError::InternalError)?;

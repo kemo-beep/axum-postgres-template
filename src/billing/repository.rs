@@ -59,6 +59,8 @@ pub struct SubscriptionTransaction {
     pub invoice_pdf_url: Option<String>,
     /// Payment status: paid, failed, created, canceled, etc.
     pub status: Option<String>,
+    /// Billing email used at checkout/payment (may differ from users.email).
+    pub billing_email: Option<String>,
     pub occurred_at: DateTime<Utc>,
 }
 
@@ -457,13 +459,14 @@ impl BillingRepository {
         hosted_invoice_url: Option<&str>,
         invoice_pdf_url: Option<&str>,
         status: Option<&str>,
+        billing_email: Option<&str>,
     ) -> Result<Uuid> {
         let id = Uuid::now_v7();
         let now = Utc::now();
         sqlx::query(
             "INSERT INTO subscription_transactions (id, user_id, org_id, subscription_id, event_type, stripe_invoice_id,
-             amount_cents, currency, receipt_url, hosted_invoice_url, invoice_pdf_url, status, occurred_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+             amount_cents, currency, receipt_url, hosted_invoice_url, invoice_pdf_url, status, billing_email, occurred_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
         )
         .bind(id)
         .bind(user_id.0)
@@ -477,6 +480,7 @@ impl BillingRepository {
         .bind(hosted_invoice_url)
         .bind(invoice_pdf_url)
         .bind(status)
+        .bind(billing_email)
         .bind(now)
         .execute(&self.pool)
         .await?;
@@ -558,7 +562,7 @@ impl BillingRepository {
     ) -> Result<Vec<SubscriptionTransaction>> {
         let rows = sqlx::query(
             "SELECT id, user_id, org_id, subscription_id, event_type, stripe_invoice_id, amount_cents, currency,
-             receipt_url, hosted_invoice_url, invoice_pdf_url, status, occurred_at
+             receipt_url, hosted_invoice_url, invoice_pdf_url, status, billing_email, occurred_at
              FROM subscription_transactions WHERE user_id = $1 ORDER BY occurred_at DESC",
         )
         .bind(user_id.0)
@@ -579,6 +583,7 @@ impl BillingRepository {
                 hosted_invoice_url: r.get("hosted_invoice_url"),
                 invoice_pdf_url: r.get("invoice_pdf_url"),
                 status: r.get("status"),
+                billing_email: r.get("billing_email"),
                 occurred_at: r.get("occurred_at"),
             })
             .collect())
@@ -590,7 +595,7 @@ impl BillingRepository {
     ) -> Result<Vec<SubscriptionTransaction>> {
         let rows = sqlx::query(
             "SELECT id, user_id, org_id, subscription_id, event_type, stripe_invoice_id, amount_cents, currency,
-             receipt_url, hosted_invoice_url, invoice_pdf_url, status, occurred_at
+             receipt_url, hosted_invoice_url, invoice_pdf_url, status, billing_email, occurred_at
              FROM subscription_transactions WHERE org_id = $1 ORDER BY occurred_at DESC",
         )
         .bind(org_id.0)
@@ -611,6 +616,7 @@ impl BillingRepository {
                 hosted_invoice_url: r.get("hosted_invoice_url"),
                 invoice_pdf_url: r.get("invoice_pdf_url"),
                 status: r.get("status"),
+                billing_email: r.get("billing_email"),
                 occurred_at: r.get("occurred_at"),
             })
             .collect())
