@@ -1,0 +1,7 @@
+Your {{ plan_name }} trial ends soon.
+
+Your trial will end on {{ trial_end }}. To continue using {{ plan_name }}, please add a payment method before then.
+{% if let Some(url) = billing_url %}
+
+Manage your subscription: {{ url }}
+{% endif %}

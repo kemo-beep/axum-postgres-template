@@ -84,7 +84,22 @@ The server listens on `http://127.0.0.1:8080` by default (or `PORT` from `.env`,
 | `GET /v1/auth/google/callback` | OAuth callback |
 | `GET /v1/auth/me` | Current user (Bearer token required) |
 | `GET /v1/files/{key}/url` | Presigned URL (auth, R2 required) |
+| `GET /v1/orgs/{org_id}/feature-flags` | Effective feature flags for org (auth, org member) |
 | `POST /webhooks/stripe` | Stripe webhook endpoint |
+
+### Internal routes (admin only)
+
+Require `Authorization: Bearer <token>` with a user that has the `admin` role:
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /internal/job-stats` | Job queue stats (enqueue, success, fail, latency) |
+| `POST /internal/impersonate` | Create short-lived token to act as another user (audit-logged) |
+| `GET /internal/feature-flags` | List all feature flags (global and per-org) |
+| `PUT /internal/feature-flags/{name}` | Set global flag (body: `{ "enabled": true }`) |
+| `PUT /internal/feature-flags/{name}?org_id=...` | Set per-org flag override |
+
+See [docs/runbook.md](docs/runbook.md) for admin tools, impersonation, feature flags, and ops procedures.
 
 Example URLs when using `PORT=7474`: `http://localhost:7474/health`, `http://localhost:7474/swagger-ui`, `http://localhost:7474/api-docs/openapi.json`.
 
@@ -192,14 +207,15 @@ src/
 ├── lib.rs, main.rs
 ├── api_error.rs, cfg.rs, db.rs, telemetry.rs, middleware.rs
 ├── types/          # UserId, TenantId
-├── auth/           # Email code, Google OAuth, email+password, JWT, RBAC
+├── auth/           # Email code, Google OAuth, email+password, JWT, RBAC, audit log
 ├── billing/        # Stripe webhooks
+├── feature_flags/  # Global and per-org feature flags
 ├── storage/        # R2 presigned URLs
 ├── services/       # JobQueue trait (tokio::spawn; Redis upgrade path)
 └── routes/         # /health, /v1/*, /webhooks/*, /swagger-ui
 ```
 
-Mounted routes: health check (readiness), versioned API at `/v1/` (auth, files), webhooks at `/webhooks/`, and Swagger UI.
+Mounted routes: health check (readiness), internal admin routes at `/internal/` (job-stats, impersonation, feature flags), versioned API at `/v1/` (auth, orgs, files, billing, feature flags), webhooks at `/webhooks/`, and Swagger UI.
 
 ## Production Readiness Checklist
 
@@ -210,6 +226,7 @@ The [docs/checklist.md](docs/checklist.md) covers:
 - **Auth** — Email code, Google OAuth, email+password
 - **Authorization** — RBAC, resource-level access, API keys
 - **Security** — Rate limiting, CORS, headers, audit logging
+- **Admin & operations** — Internal routes (auth-protected), impersonation (audit-logged), feature flags (global/per-org), runbook
 - **Payments** — Stripe / Polar.sh subscriptions and one-time purchases
 - **Storage** — Cloudflare R2 (S3-compatible)
 - **Email** — SMTP transactional emails

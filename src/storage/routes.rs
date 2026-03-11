@@ -11,6 +11,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+use validator::Validate;
 
 use crate::auth::extractor::{
     RequireAuth, RequireFilesRead, RequireFilesWrite, RequireWorkspaceMember,
@@ -98,8 +99,9 @@ pub async fn get_presigned_put_url(
     Ok(Json(PresignedUrlResponse { url }))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 pub struct UploadRequest {
+    #[validate(length(min = 1))]
     pub key: String,
 }
 
@@ -121,9 +123,10 @@ pub struct UploadRequest {
 pub async fn upload(
     State(state): State<AppState>,
     RequireAuth(_user): RequireAuth,
-    Query(UploadRequest { key }): Query<UploadRequest>,
+    Query(req): Query<UploadRequest>,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    req.validate().map_err(|e| ApiError::UnprocessableEntity(e.to_string()))?;
     let storage = state
         .storage_service
         .as_ref()
@@ -132,7 +135,7 @@ pub async fn upload(
         )))?;
 
     storage
-        .upload(&key, body)
+        .upload(&req.key, body)
         .await
         .map_err(ApiError::InternalError)?;
 

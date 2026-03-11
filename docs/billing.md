@@ -30,6 +30,29 @@ In Stripe Dashboard → Settings → Billing → Customer portal:
 - **Resume:** User can click "Resume" in Portal before period end; we sync via webhooks.
 - **After period ends:** Status becomes `canceled`; user must re-subscribe (new checkout).
 
+## Payment Failed (invoice.payment_failed)
+
+When a subscription renewal payment fails:
+
+- **Transaction logged:** A `payment_failed` subscription transaction is recorded.
+- **User notified:** An email is sent to the billing/customer email with the hosted invoice URL and a link to update payment (org billing tab when `frontend_url` is configured).
+- **Retry logic:** Stripe automatically retries failed subscription payments on a schedule (e.g. days 3, 5, 7). No application retry logic is needed.
+- **Grace period:** Status becomes `past_due` during retries; Pro access continues until Stripe exhausts retries and marks the subscription `unpaid`.
+
+Configure Smart Retries or custom retry schedules in Stripe Dashboard → Settings → Billing → Revenue recovery.
+
+## Proration
+
+Plan changes (upgrade/downgrade) use Stripe's default proration behavior (`create_prorations`): proration line items are created and appear on the next invoice. No application-level proration handling is required.
+
+## Refunds and Token Balance
+
+For token package (one-time) purchases:
+
+- `payment_intent_id` is stored when crediting tokens so refunds can be matched.
+- On `charge.refunded`, we debit the org's token balance and record a refund credit transaction.
+- Idempotency: duplicate refund events are ignored via `has_refund_for_payment_intent`.
+
 ## Background Reconciliation
 
 A background job runs hourly to fix drift from missed webhooks. It finds subscriptions where `cancel_at_period_end=true`, `current_period_end < now()`, and status still active → sets `status='canceled'`.

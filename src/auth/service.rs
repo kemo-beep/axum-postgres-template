@@ -25,13 +25,23 @@ const CODE_LENGTH: usize = 6;
 /// Grace period in seconds: allow refresh with tokens expired up to this long ago.
 const REFRESH_GRACE_SECS: i64 = 300; // 5 minutes
 
+/// Result of token verification. `impersonated_by` is set when the token is an impersonation token.
+#[derive(Debug)]
+pub struct TokenInfo {
+    pub user_id: UserId,
+    pub impersonated_by: Option<UserId>,
+}
+
 /// JWT payload: `sub` (user id), `jti` (token id for blacklist), `exp`, `iat`.
+/// Optional `impersonated_by`: admin user id when this is an impersonation token.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
-    pub sub: String, // user id
+    pub sub: String, // user id (effective user; target when impersonating)
     pub jti: String, // token id for logout/blacklist
     pub exp: i64,
     pub iat: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub impersonated_by: Option<String>, // admin user id when impersonating
 }
 
 /// Orchestrates auth flows: login codes, password reset, JWT, OAuth. Uses repositories and email sender.
@@ -329,6 +339,7 @@ impl AuthService {
             jti,
             exp: exp.timestamp(),
             iat: now.timestamp(),
+            impersonated_by: None,
         };
 
         encode(
@@ -346,7 +357,7 @@ impl AuthService {
             .map_err(ApiError::InternalError)
     }
 
-    pub async fn verify_token(&self, token: &str) -> Result<UserId, ApiError> {
+    pub async fn verify_token(&self, token: &str) -> Result<TokenInfo, ApiError> {
         let secret =
             self.cfg.jwt_secret.as_deref().ok_or_else(|| {
                 ApiError::InternalError(anyhow::anyhow!("JWT_SECRET not configured"))
@@ -370,9 +381,50 @@ impl AuthService {
             return Err(ApiError::Unauthorized);
         }
 
-        let uuid =
-            uuid::Uuid::parse_str(&token_data.claims.sub).map_err(|_| ApiError::Unauthorized)?;
-        Ok(UserId(uuid))
+        let user_id = uuid::Uuid::parse_str(&token_data.claims.sub)
+            .map_err(|_| ApiError::Unauthorized)
+            .map(UserId)?;
+        let impersonated_by = token_data
+            .claims
+            .impersonated_by
+            .as_ref()
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .map(UserId);
+        Ok(TokenInfo {
+            user_id,
+            impersonated_by,
+        })
+    }
+
+    /// Create a short-lived impersonation token. `admin_id` is the admin, `target_id` is the user to act as.
+    pub fn create_impersonation_token(
+        &self,
+        admin_id: UserId,
+        target_id: UserId,
+    ) -> Result<String, ApiError> {
+        let secret =
+            self.cfg.jwt_secret.as_deref().ok_or_else(|| {
+                ApiError::InternalError(anyhow::anyhow!("JWT_SECRET not configured"))
+            })?;
+
+        const IMPERSONATION_EXPIRY_SECS: i64 = 900; // 15 minutes
+        let now = Utc::now();
+        let exp = now + chrono::Duration::seconds(IMPERSONATION_EXPIRY_SECS);
+        let jti = uuid::Uuid::now_v7().to_string();
+        let claims = Claims {
+            sub: target_id.0.to_string(),
+            jti: jti.clone(),
+            exp: exp.timestamp(),
+            iat: now.timestamp(),
+            impersonated_by: Some(admin_id.0.to_string()),
+        };
+
+        encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .map_err(|e| ApiError::InternalError(e.into()))
     }
 
     pub async fn password_reset_request(&self, email: &str) -> Result<(), ApiError> {
@@ -498,7 +550,11 @@ impl AuthService {
 
         let user_id =
             uuid::Uuid::parse_str(&token_data.claims.sub).map_err(|_| ApiError::Unauthorized)?;
-        self.create_access_token(UserId(user_id))
+        let uid = UserId(user_id);
+        if self.user_repo.get_by_id(uid).await.map_err(ApiError::InternalError)?.is_none() {
+            return Err(ApiError::Unauthorized);
+        }
+        self.create_access_token(uid)
     }
 
     pub async fn logout(&self, token: &str) -> Result<(), ApiError> {
@@ -526,6 +582,95 @@ impl AuthService {
             .map_err(ApiError::InternalError)?;
 
         Ok(())
+    }
+
+    /// Soft-delete the current user (self-service). Sets deleted_at, deleted_by = self.
+    pub async fn soft_delete_user(&self, user_id: UserId) -> Result<(), ApiError> {
+        self.user_repo
+            .soft_delete(user_id, Some(user_id))
+            .await
+            .map_err(ApiError::InternalError)?;
+        Ok(())
+    }
+
+    /// Retention window for restore: 30 days after soft delete.
+    const RESTORE_RETENTION_DAYS: i64 = 30;
+
+    /// Request restore: send code to email if user is soft-deleted and within retention.
+    pub async fn request_restore(&self, email: &str) -> Result<(), ApiError> {
+        let email = email.trim().to_lowercase();
+        let user = self
+            .user_repo
+            .get_by_email_including_deleted(&email)
+            .await
+            .map_err(ApiError::InternalError)?
+            .ok_or_else(|| ApiError::InvalidRequest("No account found".into()))?;
+
+        let deleted_at = self
+            .user_repo
+            .get_deleted_at(user.id)
+            .await
+            .map_err(ApiError::InternalError)?
+            .ok_or_else(|| ApiError::InvalidRequest("Account is not deleted".into()))?;
+
+        let cutoff = Utc::now() - Duration::days(Self::RESTORE_RETENTION_DAYS);
+        if deleted_at < cutoff {
+            return Err(ApiError::InvalidRequest(
+                "Account cannot be restored; retention period has expired".into(),
+            ));
+        }
+
+        let code: String = (0..CODE_LENGTH)
+            .map(|_| rand::thread_rng().gen_range(0..10).to_string())
+            .collect();
+        let expires_at = Utc::now() + Duration::minutes(CODE_EXPIRY_MINUTES);
+        self.email_code_repo
+            .create(&email, &code, expires_at)
+            .await
+            .map_err(ApiError::InternalError)?;
+        self.email_sender
+            .send_login_code(&email, &code)
+            .await
+            .map_err(ApiError::InternalError)?;
+        Ok(())
+    }
+
+    /// Restore soft-deleted user with email + code. Returns new access token.
+    pub async fn restore_with_code(&self, email: &str, code: &str) -> Result<String, ApiError> {
+        let email = email.trim().to_lowercase();
+        let code = code.trim();
+        let code_id = self
+            .email_code_repo
+            .find_valid(&email, code)
+            .await
+            .map_err(ApiError::InternalError)?
+            .ok_or_else(|| ApiError::InvalidRequest("Invalid or expired code".into()))?;
+
+        let user = self
+            .user_repo
+            .get_by_email_including_deleted(&email)
+            .await
+            .map_err(ApiError::InternalError)?
+            .ok_or_else(|| ApiError::InvalidRequest("Account not found".into()))?;
+
+        let deleted_at = self
+            .user_repo
+            .get_deleted_at(user.id)
+            .await
+            .map_err(ApiError::InternalError)?
+            .ok_or_else(|| ApiError::InvalidRequest("Account is not deleted".into()))?;
+
+        let cutoff = Utc::now() - Duration::days(Self::RESTORE_RETENTION_DAYS);
+        if deleted_at < cutoff {
+            return Err(ApiError::InvalidRequest(
+                "Account cannot be restored; retention period has expired".into(),
+            ));
+        }
+
+        self.email_code_repo.mark_used(code_id).await.map_err(ApiError::InternalError)?;
+        self.user_repo.restore(user.id).await.map_err(ApiError::InternalError)?;
+
+        self.create_access_token(user.id)
     }
 
     fn hash_password(password: &str) -> Result<String, ApiError> {

@@ -2,24 +2,27 @@
 
 use axum::{
     extract::rejection::JsonRejection,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     routing::{delete, get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
+use validator::Validate;
 
 use crate::auth::api_key_repository::ApiKey;
 use crate::auth::extractor::RequireAuth;
 use crate::common::{ApiError, OrgId, WorkspaceId};
 use crate::AppState;
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema, Validate)]
 pub struct CreateApiKeyRequest {
+    #[validate(length(min = 1, max = 100))]
     pub name: String,
     pub org_id: Option<String>,
     pub workspace_id: Option<String>,
+    #[validate(length(min = 1))]
     pub permissions: Vec<String>,
     pub expires_in_days: Option<u32>,
 }
@@ -88,6 +91,7 @@ pub async fn create_key(
         )))?;
 
     let Json(req) = req?;
+    req.validate().map_err(|e| ApiError::UnprocessableEntity(e.to_string()))?;
     let org_id = req
         .org_id
         .as_ref()
@@ -132,6 +136,7 @@ pub async fn create_key(
 pub async fn list_keys(
     State(state): State<AppState>,
     RequireAuth(user): RequireAuth,
+    Query(pagination): axum::extract::Query<crate::common::PaginationQuery>,
 ) -> Result<Json<Vec<ApiKeyInfoResponse>>, ApiError> {
     let api_key_svc = state
         .api_key_service
@@ -140,7 +145,9 @@ pub async fn list_keys(
             "API key service not configured"
         )))?;
 
-    let keys = api_key_svc.list_keys(user.id).await?;
+    let limit = pagination.limit() as i64;
+    let offset = pagination.offset() as i64;
+    let keys = api_key_svc.list_keys(user.id, limit, offset).await?;
     Ok(Json(keys.iter().map(api_key_to_info).collect()))
 }
 

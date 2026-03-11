@@ -9,6 +9,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
+use validator::Validate;
 
 use crate::auth::extractor::{RequireAuth, RequireUsersRead};
 use crate::common::{ApiError, UserId};
@@ -26,9 +27,11 @@ pub struct PermissionResponse {
     pub name: String,
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema, Validate)]
 pub struct AssignRoleRequest {
+    #[validate(length(min = 1))]
     pub user_id: String,
+    #[validate(length(min = 1))]
     pub role: String,
 }
 
@@ -152,6 +155,7 @@ pub async fn assign_role(
     RequireAuth(caller): RequireAuth,
     Json(req): Json<AssignRoleRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    req.validate().map_err(|e| ApiError::UnprocessableEntity(e.to_string()))?;
     crate::auth::extractor::check_permission(
         &state,
         caller.id,

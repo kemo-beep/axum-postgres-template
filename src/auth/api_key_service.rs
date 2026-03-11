@@ -177,9 +177,14 @@ impl ApiKeyService {
         Ok(perms.to_vec())
     }
 
-    pub async fn list_keys(&self, user_id: UserId) -> Result<Vec<ApiKey>, ApiError> {
+    pub async fn list_keys(
+        &self,
+        user_id: UserId,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<ApiKey>, ApiError> {
         self.api_key_repo
-            .list_by_user_id(user_id)
+            .list_by_user_id(user_id, limit, offset)
             .await
             .map_err(ApiError::InternalError)
     }

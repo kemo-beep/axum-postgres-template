@@ -1,22 +1,25 @@
 //! Org routes: orgs, workspaces, invites.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
+use validator::Validate;
 
 use crate::auth::extractor::RequireAuth;
-use crate::common::{ApiError, OrgId};
+use crate::common::{ApiError, OrgId, PaginationQuery};
 use crate::org::repository::{Org, Workspace};
 use crate::AppState;
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema, Validate)]
 pub struct CreateOrgRequest {
+    #[validate(length(min = 1, max = 200))]
     pub name: String,
+    #[validate(length(max = 100))]
     pub slug: Option<String>,
 }
 
@@ -27,9 +30,11 @@ pub struct OrgResponse {
     pub slug: String,
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema, Validate)]
 pub struct CreateWorkspaceRequest {
+    #[validate(length(min = 1, max = 200))]
     pub name: String,
+    #[validate(length(max = 100))]
     pub slug: Option<String>,
 }
 
@@ -41,9 +46,11 @@ pub struct WorkspaceResponse {
     pub slug: String,
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema, Validate)]
 pub struct CreateInviteRequest {
+    #[validate(email)]
     pub email: String,
+    #[validate(length(min = 1, max = 50))]
     pub role: String,
 }
 
@@ -52,8 +59,9 @@ pub struct InviteResponse {
     pub token: String,
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema, Validate)]
 pub struct AcceptInviteRequest {
+    #[validate(length(min = 1))]
     pub token: String,
 }
 
@@ -95,8 +103,14 @@ fn workspace_to_response(w: &Workspace) -> WorkspaceResponse {
 pub async fn list_orgs(
     State(state): State<AppState>,
     RequireAuth(user): RequireAuth,
+    Query(pagination): Query<PaginationQuery>,
 ) -> Result<Json<Vec<OrgResponse>>, ApiError> {
-    let orgs = state.org_service.get_user_orgs(user.id).await?;
+    let limit = pagination.limit() as i64;
+    let offset = pagination.offset() as i64;
+    let orgs = state
+        .org_service
+        .get_user_orgs(user.id, limit, offset)
+        .await?;
     Ok(Json(orgs.iter().map(org_to_response).collect()))
 }
 
@@ -119,6 +133,7 @@ pub async fn create_org(
     RequireAuth(user): RequireAuth,
     Json(req): Json<CreateOrgRequest>,
 ) -> Result<Json<OrgResponse>, ApiError> {
+    req.validate().map_err(|e| ApiError::UnprocessableEntity(e.to_string()))?;
     let slug = req.slug.as_deref();
     let org = state
         .org_service
@@ -170,10 +185,16 @@ pub async fn list_members(
     State(state): State<AppState>,
     RequireAuth(user): RequireAuth,
     Path(org_id): Path<String>,
+    Query(pagination): Query<PaginationQuery>,
 ) -> Result<Json<Vec<OrgMemberResponse>>, ApiError> {
     let org_id = Uuid::parse_str(&org_id).map_err(|_| ApiError::NotFound)?;
     let org_id = OrgId::from_uuid(org_id);
-    let members = state.org_service.list_members(org_id, user.id).await?;
+    let limit = pagination.limit() as i64;
+    let offset = pagination.offset() as i64;
+    let members = state
+        .org_service
+        .list_members(org_id, user.id, limit, offset)
+        .await?;
     Ok(Json(
         members
             .iter()
@@ -207,6 +228,7 @@ pub async fn create_invite(
     Path(org_id): Path<String>,
     Json(req): Json<CreateInviteRequest>,
 ) -> Result<Json<InviteResponse>, ApiError> {
+    req.validate().map_err(|e| ApiError::UnprocessableEntity(e.to_string()))?;
     let org_id = Uuid::parse_str(&org_id).map_err(|_| ApiError::NotFound)?;
     let org_id = OrgId::from_uuid(org_id);
     let token = state
@@ -235,6 +257,7 @@ pub async fn accept_invite(
     RequireAuth(user): RequireAuth,
     Json(req): Json<AcceptInviteRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    req.validate().map_err(|e| ApiError::UnprocessableEntity(e.to_string()))?;
     state.org_service.accept_invite(&req.token, user.id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -257,10 +280,16 @@ pub async fn list_workspaces(
     State(state): State<AppState>,
     RequireAuth(user): RequireAuth,
     Path(org_id): Path<String>,
+    Query(pagination): Query<PaginationQuery>,
 ) -> Result<Json<Vec<WorkspaceResponse>>, ApiError> {
     let org_id = Uuid::parse_str(&org_id).map_err(|_| ApiError::NotFound)?;
     let org_id = OrgId::from_uuid(org_id);
-    let workspaces = state.org_service.list_workspaces(org_id, user.id).await?;
+    let limit = pagination.limit() as i64;
+    let offset = pagination.offset() as i64;
+    let workspaces = state
+        .org_service
+        .list_workspaces(org_id, user.id, limit, offset)
+        .await?;
     Ok(Json(workspaces.iter().map(workspace_to_response).collect()))
 }
 
@@ -285,6 +314,7 @@ pub async fn create_workspace(
     Path(org_id): Path<String>,
     Json(req): Json<CreateWorkspaceRequest>,
 ) -> Result<Json<WorkspaceResponse>, ApiError> {
+    req.validate().map_err(|e| ApiError::UnprocessableEntity(e.to_string()))?;
     let org_id = Uuid::parse_str(&org_id).map_err(|_| ApiError::NotFound)?;
     let org_id = OrgId::from_uuid(org_id);
     let slug = req.slug.as_deref();
@@ -305,6 +335,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/{org_id}/workspaces",
             get(list_workspaces).post(create_workspace),
+        )
+        .route(
+            "/{org_id}/feature-flags",
+            get(crate::feature_flags::routes::list_for_org),
         )
 }
 

@@ -1,12 +1,12 @@
 //! Versioned API router: /v1/auth/*, /v1/files/*, /v1/billing/*, etc.
 
-use axum::Router;
+use axum::{middleware, Router};
 
 use crate::AppState;
 
 /// Builds the v1 API router.
 pub fn router(state: &AppState) -> Router<AppState> {
-    Router::new()
+    let api = Router::new()
         .nest("/auth", crate::auth::routes::router())
         .nest("/files", crate::storage::routes::router(state))
         .nest("/billing", crate::billing::routes::billing_router(state))
@@ -23,5 +23,9 @@ pub fn router(state: &AppState) -> Router<AppState> {
                 ),
         )
         .nest("/invites", crate::org::routes::invite_router())
-        .merge(crate::auth::rbac_routes::router(state))
+        .merge(crate::auth::rbac_routes::router(state));
+
+    api.route_layer(middleware::from_fn(
+        crate::middleware::require_idempotency_key,
+    ))
 }

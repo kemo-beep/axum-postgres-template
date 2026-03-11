@@ -1,0 +1,12 @@
+Your subscription payment could not be processed.
+
+Please update your payment method to avoid service interruption. Stripe will automatically retry the payment, but updating your card now will resolve the issue quickly.
+{% if let Some(url) = hosted_invoice_url %}
+
+View your invoice: {{ url }}
+{% endif %}
+{% if let Some(url) = update_payment_url %}
+
+Update payment method: {{ url }}
+{% endif %}
+

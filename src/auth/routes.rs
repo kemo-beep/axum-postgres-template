@@ -3,7 +3,7 @@
 use axum::{
     extract::rejection::JsonRejection,
     extract::{Query, State},
-    http::HeaderMap,
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Redirect},
     routing::{get, post},
     Json, Router,
@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use utoipa::ToSchema;
+use validator::Validate;
 
 use crate::auth::extractor::RequireAuth;
 use crate::cfg::Environment;
@@ -31,37 +32,47 @@ fn build_auth_cookie(token: &str, cfg: &crate::cfg::Configuration) -> Cookie<'st
         .into_owned()
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema, Validate)]
 pub struct SendCodeRequest {
+    #[validate(email)]
     pub email: String,
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema, Validate)]
 pub struct VerifyCodeRequest {
+    #[validate(email)]
     pub email: String,
+    #[validate(length(equal = 6))]
     pub code: String,
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema, Validate)]
 pub struct RegisterRequest {
+    #[validate(email)]
     pub email: String,
+    #[validate(length(min = 8))]
     pub password: String,
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema, Validate)]
 pub struct LoginRequest {
+    #[validate(email)]
     pub email: String,
+    #[validate(length(min = 1))]
     pub password: String,
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema, Validate)]
 pub struct PasswordResetRequest {
+    #[validate(email)]
     pub email: String,
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema, Validate)]
 pub struct PasswordResetConfirmRequest {
+    #[validate(length(min = 1))]
     pub token: String,
+    #[validate(length(min = 8))]
     pub new_password: String,
 }
 
@@ -77,6 +88,25 @@ pub struct UserResponse {
     pub email: String,
     pub roles: Vec<String>,
     pub permissions: Vec<String>,
+}
+
+#[derive(Deserialize, ToSchema, Validate)]
+pub struct RestoreRequest {
+    #[validate(email)]
+    pub email: String,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct DeletePermanentRequest {
+    pub confirm: String,
+}
+
+#[derive(Deserialize, ToSchema, Validate)]
+pub struct RestoreConfirmRequest {
+    #[validate(email)]
+    pub email: String,
+    #[validate(length(equal = 6))]
+    pub code: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -101,6 +131,7 @@ pub fn router() -> Router<AppState> {
         .route("/register", post(register))
         .route("/login", post(login))
         .route("/password-reset/request", post(password_reset_request))
+        .route("/restore-request", post(restore_request))
         .route_layer(GovernorLayer::new(auth_limit_conf));
 
     Router::new()
@@ -110,6 +141,10 @@ pub fn router() -> Router<AppState> {
         .route("/google", get(google_redirect))
         .route("/google/callback", get(google_callback))
         .route("/me", get(me))
+        .route("/me/export", get(me_export))
+        .route("/me/delete", post(me_delete))
+        .route("/me/delete-permanent", post(me_delete_permanent))
+        .route("/restore", post(restore))
         .route("/refresh", post(refresh))
         .route("/logout", post(logout))
         .nest("/api-keys", crate::auth::api_key_routes::router())
@@ -133,6 +168,7 @@ pub async fn send_code(
     req: Result<Json<SendCodeRequest>, JsonRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let Json(req) = req?;
+    req.validate().map_err(|e| ApiError::UnprocessableEntity(e.to_string()))?;
     let auth = state
         .auth_service
         .as_ref()
@@ -162,6 +198,7 @@ pub async fn verify_code(
     req: Result<Json<VerifyCodeRequest>, JsonRejection>,
 ) -> Result<(CookieJar, Json<AuthResponse>), ApiError> {
     let Json(req) = req?;
+    req.validate().map_err(|e| ApiError::UnprocessableEntity(e.to_string()))?;
     let auth = state
         .auth_service
         .as_ref()
@@ -200,6 +237,7 @@ pub async fn register(
     req: Result<Json<RegisterRequest>, JsonRejection>,
 ) -> Result<(CookieJar, Json<AuthResponse>), ApiError> {
     let Json(req) = req?;
+    req.validate().map_err(|e| ApiError::UnprocessableEntity(e.to_string()))?;
     let auth = state
         .auth_service
         .as_ref()
@@ -240,6 +278,7 @@ pub async fn login(
     req: Result<Json<LoginRequest>, JsonRejection>,
 ) -> Result<(CookieJar, Json<AuthResponse>), ApiError> {
     let Json(req) = req?;
+    req.validate().map_err(|e| ApiError::UnprocessableEntity(e.to_string()))?;
     let auth = state
         .auth_service
         .as_ref()
@@ -369,6 +408,7 @@ pub async fn password_reset_request(
     req: Result<Json<PasswordResetRequest>, JsonRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let Json(req) = req?;
+    req.validate().map_err(|e| ApiError::UnprocessableEntity(e.to_string()))?;
     let auth = state
         .auth_service
         .as_ref()
@@ -396,6 +436,7 @@ pub async fn password_reset_confirm(
     req: Result<Json<PasswordResetConfirmRequest>, JsonRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let Json(req) = req?;
+    req.validate().map_err(|e| ApiError::UnprocessableEntity(e.to_string()))?;
     let auth = state
         .auth_service
         .as_ref()
@@ -498,4 +539,140 @@ pub async fn me(
         roles,
         permissions,
     }))
+}
+
+/// Export all user data (GDPR right to portability).
+#[utoipa::path(
+    get,
+    path = "/v1/auth/me/export",
+    tag = "Auth",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "User data export", body = inline(serde_json::Value)),
+        (status = 401, description = "Unauthorized", body = crate::common::ApiErrorResp)
+    )
+)]
+pub async fn me_export(
+    State(state): State<AppState>,
+    RequireAuth(user): RequireAuth,
+) -> Result<impl IntoResponse, ApiError> {
+    let export =
+        crate::auth::account_export::export_account_data(&state, user.id).await?;
+    let json = serde_json::to_string_pretty(&export)
+        .map_err(|e| ApiError::InternalError(e.into()))?;
+    let headers = [
+        (header::CONTENT_TYPE, HeaderValue::from_static("application/json")),
+        (
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_static("attachment; filename=\"my-data.json\""),
+        ),
+    ];
+    Ok((StatusCode::OK, headers, json))
+}
+
+/// Soft-delete current user. Requires auth. Account can be restored within retention (e.g. 30 days) via restore endpoint.
+#[utoipa::path(
+    post,
+    path = "/v1/auth/me/delete",
+    tag = "Auth",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Account soft-deleted", body = inline(serde_json::Value)),
+        (status = 401, description = "Unauthorized", body = crate::common::ApiErrorResp)
+    )
+)]
+pub async fn me_delete(
+    State(state): State<AppState>,
+    RequireAuth(user): RequireAuth,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let auth = state.auth_service.as_ref().ok_or(ApiError::InternalError(
+        anyhow::anyhow!("Auth not configured"),
+    ))?;
+    auth.soft_delete_user(user.id).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Permanently delete account (GDPR erasure). Requires confirmation. Irreversible.
+#[utoipa::path(
+    post,
+    path = "/v1/auth/me/delete-permanent",
+    tag = "Auth",
+    request_body = DeletePermanentRequest,
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Account permanently deleted", body = inline(serde_json::Value)),
+        (status = 400, description = "Confirmation required or invalid", body = crate::common::ApiErrorResp),
+        (status = 401, description = "Unauthorized", body = crate::common::ApiErrorResp)
+    )
+)]
+pub async fn me_delete_permanent(
+    State(state): State<AppState>,
+    RequireAuth(user): RequireAuth,
+    req: Result<Json<DeletePermanentRequest>, JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    const CONFIRM_PHRASE: &str = "DELETE_MY_ACCOUNT";
+    let Json(req) = req?;
+    if req.confirm.trim() != CONFIRM_PHRASE {
+        return Err(ApiError::InvalidRequest(
+            format!("Confirmation must be exactly '{}'", CONFIRM_PHRASE).into(),
+        ));
+    }
+    crate::auth::account_deletion::delete_account_permanently(&state, user.id).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Request restore code for soft-deleted account. Sends code to email if within retention.
+#[utoipa::path(
+    post,
+    path = "/v1/auth/restore-request",
+    tag = "Auth",
+    request_body = RestoreRequest,
+    responses(
+        (status = 200, description = "Code sent if account eligible for restore", body = inline(serde_json::Value)),
+        (status = 400, description = "Bad request", body = crate::common::ApiErrorResp)
+    )
+)]
+pub async fn restore_request(
+    State(state): State<AppState>,
+    req: Result<Json<RestoreRequest>, JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(req) = req?;
+    req.validate().map_err(|e| ApiError::UnprocessableEntity(e.to_string()))?;
+    let auth = state.auth_service.as_ref().ok_or(ApiError::InternalError(
+        anyhow::anyhow!("Auth not configured"),
+    ))?;
+    auth.request_restore(&req.email).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Restore soft-deleted account with email + code. Returns new access token.
+#[utoipa::path(
+    post,
+    path = "/v1/auth/restore",
+    tag = "Auth",
+    request_body = RestoreConfirmRequest,
+    responses(
+        (status = 200, description = "Restored", body = AuthResponse),
+        (status = 400, description = "Invalid code or expired retention", body = crate::common::ApiErrorResp)
+    )
+)]
+pub async fn restore(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    req: Result<Json<RestoreConfirmRequest>, JsonRejection>,
+) -> Result<(CookieJar, Json<AuthResponse>), ApiError> {
+    let Json(req) = req?;
+    req.validate().map_err(|e| ApiError::UnprocessableEntity(e.to_string()))?;
+    let auth = state.auth_service.as_ref().ok_or(ApiError::InternalError(
+        anyhow::anyhow!("Auth not configured"),
+    ))?;
+    let access_token = auth.restore_with_code(&req.email, &req.code).await?;
+    let cookie = build_auth_cookie(&access_token, &state.cfg);
+    Ok((
+        jar.add(cookie),
+        Json(AuthResponse {
+            access_token,
+            token_type: "Bearer".to_string(),
+        }),
+    ))
 }

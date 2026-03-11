@@ -94,7 +94,7 @@ impl OrgRepository {
 
     pub async fn get_org(&self, id: OrgId) -> Result<Option<Org>> {
         let row =
-            sqlx::query("SELECT id, name, slug, created_at, updated_at FROM orgs WHERE id = $1")
+            sqlx::query("SELECT id, name, slug, created_at, updated_at FROM orgs WHERE id = $1 AND deleted_at IS NULL")
                 .bind(id.0)
                 .fetch_optional(&self.pool)
                 .await?;
@@ -109,7 +109,7 @@ impl OrgRepository {
 
     pub async fn get_org_by_slug(&self, slug: &str) -> Result<Option<Org>> {
         let row =
-            sqlx::query("SELECT id, name, slug, created_at, updated_at FROM orgs WHERE slug = $1")
+            sqlx::query("SELECT id, name, slug, created_at, updated_at FROM orgs WHERE slug = $1 AND deleted_at IS NULL")
                 .bind(slug)
                 .fetch_optional(&self.pool)
                 .await?;
@@ -143,17 +143,25 @@ impl OrgRepository {
         Ok(result.rows_affected() > 0)
     }
 
-    pub async fn get_user_orgs(&self, user_id: UserId) -> Result<Vec<Org>> {
+    pub async fn get_user_orgs(
+        &self,
+        user_id: UserId,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Org>> {
         let rows = sqlx::query(
             r#"
             SELECT o.id, o.name, o.slug, o.created_at, o.updated_at
             FROM orgs o
             JOIN org_members om ON om.org_id = o.id
-            WHERE om.user_id = $1
+            WHERE om.user_id = $1 AND o.deleted_at IS NULL
             ORDER BY o.name
+            LIMIT $2 OFFSET $3
             "#,
         )
         .bind(user_id.0)
+        .bind(limit)
+        .bind(offset)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -168,11 +176,18 @@ impl OrgRepository {
             .collect())
     }
 
-    pub async fn get_org_members(&self, org_id: OrgId) -> Result<Vec<OrgMember>> {
+    pub async fn get_org_members(
+        &self,
+        org_id: OrgId,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<OrgMember>> {
         let rows = sqlx::query(
-            "SELECT org_id, user_id, role, created_at FROM org_members WHERE org_id = $1 ORDER BY created_at",
+            "SELECT org_id, user_id, role, created_at FROM org_members WHERE org_id = $1 ORDER BY created_at LIMIT $2 OFFSET $3",
         )
         .bind(org_id.0)
+        .bind(limit)
+        .bind(offset)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -190,17 +205,22 @@ impl OrgRepository {
     pub async fn get_org_members_with_users(
         &self,
         org_id: OrgId,
+        limit: i64,
+        offset: i64,
     ) -> Result<Vec<OrgMemberWithEmail>> {
         let rows = sqlx::query(
             r#"
             SELECT om.org_id, om.user_id, om.role, om.created_at, u.email
             FROM org_members om
-            JOIN users u ON u.id = om.user_id
+            JOIN users u ON u.id = om.user_id AND u.deleted_at IS NULL
             WHERE om.org_id = $1
             ORDER BY om.created_at
+            LIMIT $2 OFFSET $3
             "#,
         )
         .bind(org_id.0)
+        .bind(limit)
+        .bind(offset)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -277,7 +297,7 @@ impl OrgRepository {
 
     pub async fn get_workspace(&self, id: WorkspaceId) -> Result<Option<Workspace>> {
         let row = sqlx::query(
-            "SELECT id, org_id, name, slug, created_at, updated_at FROM workspaces WHERE id = $1",
+            "SELECT id, org_id, name, slug, created_at, updated_at FROM workspaces WHERE id = $1 AND deleted_at IS NULL",
         )
         .bind(id.0)
         .fetch_optional(&self.pool)
@@ -292,11 +312,18 @@ impl OrgRepository {
         }))
     }
 
-    pub async fn list_workspaces(&self, org_id: OrgId) -> Result<Vec<Workspace>> {
+    pub async fn list_workspaces(
+        &self,
+        org_id: OrgId,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Workspace>> {
         let rows = sqlx::query(
-            "SELECT id, org_id, name, slug, created_at, updated_at FROM workspaces WHERE org_id = $1 ORDER BY name",
+            "SELECT id, org_id, name, slug, created_at, updated_at FROM workspaces WHERE org_id = $1 AND deleted_at IS NULL ORDER BY name LIMIT $2 OFFSET $3",
         )
         .bind(org_id.0)
+        .bind(limit)
+        .bind(offset)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -324,7 +351,8 @@ impl OrgRepository {
             SELECT EXISTS(
                 SELECT 1 FROM workspaces w
                 JOIN org_members om ON om.org_id = w.org_id
-                WHERE w.id = $1 AND om.user_id = $2
+                JOIN orgs o ON o.id = w.org_id AND o.deleted_at IS NULL
+                WHERE w.id = $1 AND om.user_id = $2 AND w.deleted_at IS NULL
             )
             "#,
         )
@@ -402,6 +430,83 @@ impl OrgRepository {
             .bind(id)
             .execute(&self.pool)
             .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Delete all invites for the given email. Used for account deletion.
+    pub async fn delete_invites_by_email(&self, email: &str) -> Result<u64> {
+        let result = sqlx::query("DELETE FROM org_invites WHERE email = $1")
+            .bind(email)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Delete expired invites. Returns number of rows deleted.
+    pub async fn delete_expired_invites(&self) -> Result<u64> {
+        let now = Utc::now();
+        let result = sqlx::query("DELETE FROM org_invites WHERE expires_at < $1")
+            .bind(now)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Soft-delete org. Sets deleted_at and deleted_by.
+    pub async fn soft_delete_org(&self, org_id: OrgId, deleted_by: UserId) -> Result<bool> {
+        let now = Utc::now();
+        let result = sqlx::query(
+            "UPDATE orgs SET deleted_at = $1, deleted_by = $2 WHERE id = $3 AND deleted_at IS NULL",
+        )
+        .bind(now)
+        .bind(deleted_by.0)
+        .bind(org_id.0)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Restore soft-deleted org.
+    pub async fn restore_org(&self, org_id: OrgId) -> Result<bool> {
+        let now = Utc::now();
+        let result = sqlx::query(
+            "UPDATE orgs SET deleted_at = NULL, deleted_by = NULL, updated_at = $1 WHERE id = $2 AND deleted_at IS NOT NULL",
+        )
+        .bind(now)
+        .bind(org_id.0)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Soft-delete workspace. Sets deleted_at and deleted_by.
+    pub async fn soft_delete_workspace(
+        &self,
+        workspace_id: WorkspaceId,
+        deleted_by: UserId,
+    ) -> Result<bool> {
+        let now = Utc::now();
+        let result = sqlx::query(
+            "UPDATE workspaces SET deleted_at = $1, deleted_by = $2 WHERE id = $3 AND deleted_at IS NULL",
+        )
+        .bind(now)
+        .bind(deleted_by.0)
+        .bind(workspace_id.0)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Restore soft-deleted workspace.
+    pub async fn restore_workspace(&self, workspace_id: WorkspaceId) -> Result<bool> {
+        let now = Utc::now();
+        let result = sqlx::query(
+            "UPDATE workspaces SET deleted_at = NULL, deleted_by = NULL, updated_at = $1 WHERE id = $2 AND deleted_at IS NOT NULL",
+        )
+        .bind(now)
+        .bind(workspace_id.0)
+        .execute(&self.pool)
+        .await?;
         Ok(result.rows_affected() > 0)
     }
 }

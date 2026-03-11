@@ -8,8 +8,11 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+
+use crate::common::PaginationQuery;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+use validator::Validate;
 
 use axum::middleware::from_extractor_with_state;
 
@@ -65,11 +68,23 @@ pub fn router() -> Router<AppState> {
 
 // --- v1/billing routes ---
 
-#[derive(Deserialize, ToSchema)]
+fn validate_checkout_mode(mode: &str) -> Result<(), validator::ValidationError> {
+    if mode == "subscription" || mode == "payment" {
+        Ok(())
+    } else {
+        Err(validator::ValidationError::new("mode"))
+    }
+}
+
+#[derive(Deserialize, ToSchema, Validate)]
 pub struct CheckoutRequest {
+    #[validate(custom(function = "validate_checkout_mode"))]
     pub mode: String, // "subscription" | "payment"
+    #[validate(length(min = 1))]
     pub price_id: String,
+    #[validate(url)]
     pub success_url: String,
+    #[validate(url)]
     pub cancel_url: String,
 }
 
@@ -158,6 +173,7 @@ pub async fn checkout(
     req: Result<Json<CheckoutRequest>, JsonRejection>,
 ) -> Result<Json<UrlResponse>, ApiError> {
     let Json(req) = req?;
+    req.validate().map_err(|e| ApiError::UnprocessableEntity(e.to_string()))?;
     let billing = state
         .billing_service
         .as_ref()
@@ -367,6 +383,7 @@ pub async fn get_subscription(
 pub async fn transactions(
     State(state): State<AppState>,
     RequireOrgBillingAccess(_user, org_id): RequireOrgBillingAccess,
+    Query(pagination): Query<PaginationQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let billing = state
         .billing_service
@@ -375,8 +392,10 @@ pub async fn transactions(
             "Billing not configured"
         )))?;
 
+    let limit = pagination.limit() as i64;
+    let offset = pagination.offset() as i64;
     let (sub_tx, credit_tx) = billing
-        .list_transactions_by_org(org_id)
+        .list_transactions_by_org(org_id, limit, offset)
         .await
         .map_err(ApiError::InternalError)?;
 
@@ -386,8 +405,9 @@ pub async fn transactions(
     })))
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema, Validate)]
 pub struct ChangePlanRequest {
+    #[validate(length(min = 1))]
     pub price_id: String,
 }
 
@@ -458,6 +478,7 @@ pub async fn subscription_change_plan(
     req: Result<Json<ChangePlanRequest>, JsonRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let Json(req) = req?;
+    req.validate().map_err(|e| ApiError::UnprocessableEntity(e.to_string()))?;
     let billing = state
         .billing_service
         .as_ref()

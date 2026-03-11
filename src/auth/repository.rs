@@ -69,7 +69,7 @@ impl UserRepository {
 
     pub async fn get_by_id(&self, id: UserId) -> Result<Option<User>> {
         let row = sqlx::query(
-            "SELECT id, email, password_hash, google_sub, stripe_customer_id, failed_login_attempts, locked_until, created_at, updated_at FROM users WHERE id = $1",
+            "SELECT id, email, password_hash, google_sub, stripe_customer_id, failed_login_attempts, locked_until, created_at, updated_at FROM users WHERE id = $1 AND deleted_at IS NULL",
         )
         .bind(id.0)
         .fetch_optional(&self.pool)
@@ -89,7 +89,7 @@ impl UserRepository {
 
     pub async fn get_by_email(&self, email: &str) -> Result<Option<User>> {
         let row = sqlx::query(
-            "SELECT id, email, password_hash, google_sub, stripe_customer_id, failed_login_attempts, locked_until, created_at, updated_at FROM users WHERE email = $1",
+            "SELECT id, email, password_hash, google_sub, stripe_customer_id, failed_login_attempts, locked_until, created_at, updated_at FROM users WHERE email = $1 AND deleted_at IS NULL",
         )
         .bind(email)
         .fetch_optional(&self.pool)
@@ -182,6 +182,94 @@ impl UserRepository {
         .await?;
         Ok(())
     }
+
+    /// Soft-delete user. Sets deleted_at and deleted_by.
+    pub async fn soft_delete(&self, user_id: UserId, deleted_by: Option<UserId>) -> Result<bool> {
+        let now = Utc::now();
+        let result = sqlx::query(
+            "UPDATE users SET deleted_at = $1, deleted_by = $2, updated_at = $1 WHERE id = $3 AND deleted_at IS NULL",
+        )
+        .bind(now)
+        .bind(deleted_by.map(|u| u.0))
+        .bind(user_id.0)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Restore soft-deleted user. Clears deleted_at and deleted_by.
+    pub async fn restore(&self, user_id: UserId) -> Result<bool> {
+        let now = Utc::now();
+        let result = sqlx::query(
+            "UPDATE users SET deleted_at = NULL, deleted_by = NULL, updated_at = $1 WHERE id = $2 AND deleted_at IS NOT NULL",
+        )
+        .bind(now)
+        .bind(user_id.0)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Get user by id including soft-deleted (for account deletion flow).
+    pub async fn get_by_id_including_deleted(&self, id: UserId) -> Result<Option<User>> {
+        let row = sqlx::query(
+            "SELECT id, email, password_hash, google_sub, stripe_customer_id, failed_login_attempts, locked_until, created_at, updated_at FROM users WHERE id = $1",
+        )
+        .bind(id.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| User {
+            id: UserId(row.get("id")),
+            email: row.get("email"),
+            password_hash: row.get("password_hash"),
+            google_sub: row.get("google_sub"),
+            stripe_customer_id: row.get("stripe_customer_id"),
+            failed_login_attempts: row.get::<i32, _>("failed_login_attempts"),
+            locked_until: row.get("locked_until"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        }))
+    }
+
+    /// Get user by email including soft-deleted (for restore flow).
+    pub async fn get_by_email_including_deleted(&self, email: &str) -> Result<Option<User>> {
+        let row = sqlx::query(
+            "SELECT id, email, password_hash, google_sub, stripe_customer_id, failed_login_attempts, locked_until, created_at, updated_at FROM users WHERE email = $1",
+        )
+        .bind(email)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| User {
+            id: UserId(row.get("id")),
+            email: row.get("email"),
+            password_hash: row.get("password_hash"),
+            google_sub: row.get("google_sub"),
+            stripe_customer_id: row.get("stripe_customer_id"),
+            failed_login_attempts: row.get::<i32, _>("failed_login_attempts"),
+            locked_until: row.get("locked_until"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        }))
+    }
+
+    /// Hard-delete user. Caller must have cleaned up dependent data (email_login_codes by email, org_invites by email, anonymized billing).
+    pub async fn delete_permanently(&self, user_id: UserId) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id.0)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Returns deleted_at for user (to check if within retention window).
+    pub async fn get_deleted_at(&self, user_id: UserId) -> Result<Option<DateTime<Utc>>> {
+        let row =
+            sqlx::query_scalar::<_, Option<DateTime<Utc>>>("SELECT deleted_at FROM users WHERE id = $1")
+                .bind(user_id.0)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.flatten())
+    }
 }
 
 /// Database access for `email_login_codes` (magic link / login codes).
@@ -232,6 +320,25 @@ impl EmailCodeRepository {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// Delete all login codes for the given email. Used for account deletion.
+    pub async fn delete_by_email(&self, email: &str) -> Result<u64> {
+        let result = sqlx::query("DELETE FROM email_login_codes WHERE email = $1")
+            .bind(email)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Delete expired login codes. Returns number of rows deleted.
+    pub async fn delete_expired(&self) -> Result<u64> {
+        let now = Utc::now();
+        let result = sqlx::query("DELETE FROM email_login_codes WHERE expires_at < $1")
+            .bind(now)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
     }
 }
 
@@ -402,6 +509,16 @@ impl PasswordResetRepository {
             .await?;
         Ok(())
     }
+
+    /// Delete expired password reset tokens. Returns number of rows deleted.
+    pub async fn delete_expired(&self) -> Result<u64> {
+        let now = Utc::now();
+        let result = sqlx::query("DELETE FROM password_reset_tokens WHERE expires_at < $1")
+            .bind(now)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
 }
 
 #[derive(Clone)]
@@ -431,5 +548,15 @@ impl TokenBlacklistRepository {
                 .fetch_one(&self.pool)
                 .await?;
         Ok(exists)
+    }
+
+    /// Delete expired blacklist entries (tokens past their exp). Returns number of rows deleted.
+    pub async fn delete_expired(&self) -> Result<u64> {
+        let now = Utc::now();
+        let result = sqlx::query("DELETE FROM token_blacklist WHERE exp < $1")
+            .bind(now)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
     }
 }

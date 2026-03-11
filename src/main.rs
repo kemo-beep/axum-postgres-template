@@ -52,6 +52,7 @@ async fn main() {
         None => None,
     };
 
+    let pool = db.pool.clone();
     let router = server::router(cfg, db, storage_service);
 
     // Use connect_info for rate limiting (tower_governor PeerIpKeyExtractor)
@@ -63,10 +64,26 @@ async fn main() {
     .await
     .expect("Failed to start server");
 
-    tracing::info!("Server shut down");
+    tracing::info!("Server stopped, closing resources");
+    pool.close().await;
+    tracing::info!("DB pool closed");
 }
 
 /// Returns a future that completes when SIGTERM or SIGINT is received.
+#[cfg(unix)]
+async fn shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut sigterm = signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
+    let mut sigint = signal(SignalKind::interrupt()).expect("Failed to install SIGINT handler");
+
+    tokio::select! {
+        _ = sigterm.recv() => tracing::info!("Received SIGTERM"),
+        _ = sigint.recv() => tracing::info!("Received SIGINT"),
+    }
+}
+
+#[cfg(not(unix))]
 async fn shutdown_signal() {
     tokio::signal::ctrl_c()
         .await

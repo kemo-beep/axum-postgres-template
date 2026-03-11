@@ -90,6 +90,12 @@ pub struct CreditTransaction {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug)]
+pub struct UserCredits {
+    pub user_id: UserId,
+    pub balance: i64,
+}
+
 /// Database access for plans, subscriptions, packages, and transactions.
 #[derive(Clone)]
 pub struct BillingRepository {
@@ -288,6 +294,38 @@ impl BillingRepository {
         })
     }
 
+    pub async fn list_subscriptions_by_user(&self, user_id: UserId) -> Result<Vec<Subscription>> {
+        let rows = sqlx::query(
+            "SELECT id, user_id, org_id, stripe_customer_id, stripe_subscription_id, plan_id, status,
+                    current_period_start, current_period_end, cancel_at_period_end, trial_start, trial_end, canceled_at, latest_invoice_id, last_payment_at, paused_at
+             FROM subscriptions WHERE user_id = $1 ORDER BY created_at DESC",
+        )
+        .bind(user_id.0)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r: sqlx::postgres::PgRow| Subscription {
+                id: r.get("id"),
+                user_id: UserId(r.get("user_id")),
+                org_id: r.get::<Option<Uuid>, _>("org_id").map(OrgId::from_uuid),
+                stripe_customer_id: r.get("stripe_customer_id"),
+                stripe_subscription_id: r.get("stripe_subscription_id"),
+                plan_id: r.get("plan_id"),
+                status: r.get("status"),
+                current_period_start: r.get("current_period_start"),
+                current_period_end: r.get("current_period_end"),
+                cancel_at_period_end: r.get("cancel_at_period_end"),
+                trial_start: r.get("trial_start"),
+                trial_end: r.get("trial_end"),
+                canceled_at: r.get("canceled_at"),
+                latest_invoice_id: r.get("latest_invoice_id"),
+                last_payment_at: r.get("last_payment_at"),
+                paused_at: r.get("paused_at"),
+            })
+            .collect())
+    }
+
     pub async fn get_subscription_by_org(&self, org_id: OrgId) -> Result<Option<Subscription>> {
         let row = sqlx::query(
             "SELECT id, user_id, org_id, stripe_customer_id, stripe_subscription_id, plan_id, status,
@@ -426,6 +464,104 @@ impl BillingRepository {
         Ok(())
     }
 
+    /// List trialing subscriptions with trial_end within the next `days` days.
+    pub async fn list_trials_ending_soon(&self, days: i64) -> Result<Vec<(Subscription, String)>> {
+        let now = Utc::now();
+        let end = now + chrono::Duration::days(days);
+        let rows = sqlx::query(
+            r#"
+            SELECT s.id, s.user_id, s.org_id, s.stripe_customer_id, s.stripe_subscription_id,
+                   s.plan_id, s.status, s.current_period_start, s.current_period_end,
+                   s.cancel_at_period_end, s.trial_start, s.trial_end, s.canceled_at,
+                   s.latest_invoice_id, s.last_payment_at, s.paused_at,
+                   COALESCE(p.name, 'Pro') AS plan_name
+            FROM subscriptions s
+            LEFT JOIN subscription_plans p ON p.id = s.plan_id
+            WHERE s.status = 'trialing'
+              AND s.trial_end IS NOT NULL
+              AND s.trial_end > $1
+              AND s.trial_end <= $2
+            "#,
+        )
+        .bind(now)
+        .bind(end)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r: sqlx::postgres::PgRow| {
+                let sub = Subscription {
+                    id: r.get("id"),
+                    user_id: UserId(r.get("user_id")),
+                    org_id: r.get::<Option<Uuid>, _>("org_id").map(OrgId::from_uuid),
+                    stripe_customer_id: r.get("stripe_customer_id"),
+                    stripe_subscription_id: r.get("stripe_subscription_id"),
+                    plan_id: r.get("plan_id"),
+                    status: r.get("status"),
+                    current_period_start: r.get("current_period_start"),
+                    current_period_end: r.get("current_period_end"),
+                    cancel_at_period_end: r.get("cancel_at_period_end"),
+                    trial_start: r.get("trial_start"),
+                    trial_end: r.get("trial_end"),
+                    canceled_at: r.get("canceled_at"),
+                    latest_invoice_id: r.get("latest_invoice_id"),
+                    last_payment_at: r.get("last_payment_at"),
+                    paused_at: r.get("paused_at"),
+                };
+                let plan_name: String = r.get("plan_name");
+                (sub, plan_name)
+            })
+            .collect())
+    }
+
+    /// List subscriptions with status past_due.
+    pub async fn list_past_due_subscriptions(&self) -> Result<Vec<Subscription>> {
+        let rows = sqlx::query(
+            "SELECT id, user_id, org_id, stripe_customer_id, stripe_subscription_id, plan_id, status,
+                    current_period_start, current_period_end, cancel_at_period_end, trial_start, trial_end, canceled_at, latest_invoice_id, last_payment_at, paused_at
+             FROM subscriptions WHERE status = 'past_due'",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r: sqlx::postgres::PgRow| Subscription {
+                id: r.get("id"),
+                user_id: UserId(r.get("user_id")),
+                org_id: r.get::<Option<Uuid>, _>("org_id").map(OrgId::from_uuid),
+                stripe_customer_id: r.get("stripe_customer_id"),
+                stripe_subscription_id: r.get("stripe_subscription_id"),
+                plan_id: r.get("plan_id"),
+                status: r.get("status"),
+                current_period_start: r.get("current_period_start"),
+                current_period_end: r.get("current_period_end"),
+                cancel_at_period_end: r.get("cancel_at_period_end"),
+                trial_start: r.get("trial_start"),
+                trial_end: r.get("trial_end"),
+                canceled_at: r.get("canceled_at"),
+                latest_invoice_id: r.get("latest_invoice_id"),
+                last_payment_at: r.get("last_payment_at"),
+                paused_at: r.get("paused_at"),
+            })
+            .collect())
+    }
+
+    /// Get hosted invoice URL from latest payment_failed transaction for a subscription.
+    pub async fn get_latest_payment_failed_invoice_url(
+        &self,
+        subscription_id: Uuid,
+    ) -> Result<Option<String>> {
+        let row = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT hosted_invoice_url FROM subscription_transactions
+             WHERE subscription_id = $1 AND event_type = 'payment_failed'
+             ORDER BY occurred_at DESC LIMIT 1",
+        )
+        .bind(subscription_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.flatten())
+    }
+
     /// Reconcile subscriptions that should be canceled (cancel_at_period_end and period ended).
     /// Safety net when webhooks are missed. Run hourly via background job.
     pub async fn reconcile_stale_cancel_at_period_end(&self) -> Result<u64> {
@@ -524,6 +660,19 @@ impl BillingRepository {
         Ok(id)
     }
 
+    pub async fn get_user_credits(&self, user_id: UserId) -> Result<Option<UserCredits>> {
+        let row = sqlx::query(
+            "SELECT user_id, balance FROM user_credits WHERE user_id = $1",
+        )
+        .bind(user_id.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r: sqlx::postgres::PgRow| UserCredits {
+            user_id: UserId(r.get("user_id")),
+            balance: r.get("balance"),
+        }))
+    }
+
     pub async fn upsert_user_credits(&self, user_id: UserId, delta: i64) -> Result<()> {
         let now = Utc::now();
         sqlx::query(
@@ -559,13 +708,17 @@ impl BillingRepository {
     pub async fn list_subscription_transactions(
         &self,
         user_id: UserId,
+        limit: i64,
+        offset: i64,
     ) -> Result<Vec<SubscriptionTransaction>> {
         let rows = sqlx::query(
             "SELECT id, user_id, org_id, subscription_id, event_type, stripe_invoice_id, amount_cents, currency,
              receipt_url, hosted_invoice_url, invoice_pdf_url, status, billing_email, occurred_at
-             FROM subscription_transactions WHERE user_id = $1 ORDER BY occurred_at DESC",
+             FROM subscription_transactions WHERE user_id = $1 ORDER BY occurred_at DESC LIMIT $2 OFFSET $3",
         )
         .bind(user_id.0)
+        .bind(limit)
+        .bind(offset)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -592,13 +745,17 @@ impl BillingRepository {
     pub async fn list_subscription_transactions_by_org(
         &self,
         org_id: OrgId,
+        limit: i64,
+        offset: i64,
     ) -> Result<Vec<SubscriptionTransaction>> {
         let rows = sqlx::query(
             "SELECT id, user_id, org_id, subscription_id, event_type, stripe_invoice_id, amount_cents, currency,
              receipt_url, hosted_invoice_url, invoice_pdf_url, status, billing_email, occurred_at
-             FROM subscription_transactions WHERE org_id = $1 ORDER BY occurred_at DESC",
+             FROM subscription_transactions WHERE org_id = $1 ORDER BY occurred_at DESC LIMIT $2 OFFSET $3",
         )
         .bind(org_id.0)
+        .bind(limit)
+        .bind(offset)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -625,12 +782,16 @@ impl BillingRepository {
     pub async fn list_credit_transactions(
         &self,
         user_id: UserId,
+        limit: i64,
+        offset: i64,
     ) -> Result<Vec<CreditTransaction>> {
         let rows = sqlx::query(
             "SELECT id, user_id, org_id, package_id, amount_tokens, amount_cents, currency, kind, receipt_url, created_at
-             FROM credit_transactions WHERE user_id = $1 ORDER BY created_at DESC",
+             FROM credit_transactions WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
         )
         .bind(user_id.0)
+        .bind(limit)
+        .bind(offset)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -650,15 +811,53 @@ impl BillingRepository {
             .collect())
     }
 
+    /// Get the purchase credit transaction by Stripe payment intent ID for refund handling.
+    /// Returns (user_id, org_id, amount_tokens, amount_cents) or None if not found.
+    pub async fn get_purchase_by_stripe_payment_intent_id(
+        &self,
+        stripe_payment_intent_id: &str,
+    ) -> Result<Option<(UserId, OrgId, i64, i64)>> {
+        let row = sqlx::query(
+            "SELECT user_id, org_id, amount_tokens, amount_cents FROM credit_transactions
+             WHERE stripe_payment_intent_id = $1 AND kind = 'purchase' AND org_id IS NOT NULL LIMIT 1",
+        )
+        .bind(stripe_payment_intent_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r: sqlx::postgres::PgRow| {
+            (
+                UserId(r.get("user_id")),
+                OrgId::from_uuid(r.get("org_id")),
+                r.get("amount_tokens"),
+                r.get("amount_cents"),
+            )
+        }))
+    }
+
+    /// Check if a refund has already been recorded for this payment intent (idempotency).
+    pub async fn has_refund_for_payment_intent(&self, stripe_payment_intent_id: &str) -> Result<bool> {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM credit_transactions WHERE stripe_payment_intent_id = $1 AND kind = 'refund')",
+        )
+        .bind(stripe_payment_intent_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(exists)
+    }
+
     pub async fn list_credit_transactions_by_org(
         &self,
         org_id: OrgId,
+        limit: i64,
+        offset: i64,
     ) -> Result<Vec<CreditTransaction>> {
         let rows = sqlx::query(
             "SELECT id, user_id, org_id, package_id, amount_tokens, amount_cents, currency, kind, receipt_url, created_at
-             FROM credit_transactions WHERE org_id = $1 ORDER BY created_at DESC",
+             FROM credit_transactions WHERE org_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
         )
         .bind(org_id.0)
+        .bind(limit)
+        .bind(offset)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -867,5 +1066,16 @@ impl BillingRepository {
             .await?;
         }
         Ok(())
+    }
+
+    /// Anonymize billing_email in subscription_transactions for a user (GDPR erasure).
+    pub async fn anonymize_billing_email_for_user(&self, user_id: UserId) -> Result<u64> {
+        let result = sqlx::query(
+            "UPDATE subscription_transactions SET billing_email = '<deleted>' WHERE user_id = $1 AND billing_email IS NOT NULL",
+        )
+        .bind(user_id.0)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 }

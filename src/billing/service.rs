@@ -1,6 +1,8 @@
 //! Billing service: Stripe Checkout, Customer Portal, webhook processing,
 //! subscription cancel/upgrade/downgrade, grace period and dunning.
 
+use std::time::Duration;
+
 use anyhow::Result;
 use chrono::TimeZone;
 use hmac::{Hmac, Mac};
@@ -15,13 +17,29 @@ use stripe::RetrieveCheckoutSessionLineItems;
 use subtle::ConstantTimeEq;
 use tracing::{info, warn};
 
+use std::sync::Arc;
+
 use crate::auth::repository::UserRepository;
+use crate::auth::EmailSender;
 use crate::billing::repository::BillingRepository;
+use crate::services::{JobQueue, ObservantJobQueue};
 use crate::cfg::StripeConfig;
 use crate::common::{ApiError, OrgId, UserId};
 use crate::org::repository::OrgRepository;
 
 type HmacSha256 = Hmac<Sha256>;
+
+const STRIPE_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn stripe_timeout<F, T>(future: F) -> Result<T, ApiError>
+where
+    F: std::future::Future<Output = Result<T, stripe::StripeError>>,
+{
+    tokio::time::timeout(STRIPE_TIMEOUT, future)
+        .await
+        .map_err(|_| ApiError::InternalError(anyhow::anyhow!("Stripe request timed out")))?
+        .map_err(|e| ApiError::InternalError(anyhow::anyhow!("Stripe: {}", e)))
+}
 
 /// Stripe integration: Checkout, Portal, webhooks, subscription management.
 #[derive(Clone)]
@@ -31,6 +49,9 @@ pub struct BillingService {
     billing_repo: BillingRepository,
     user_repo: UserRepository,
     org_repo: OrgRepository,
+    email_sender: Arc<dyn EmailSender>,
+    job_queue: Arc<ObservantJobQueue>,
+    frontend_url: Option<String>,
 }
 
 impl BillingService {
@@ -50,6 +71,86 @@ impl BillingService {
             .await
     }
 
+    /// Send trial ending soon reminders for trialing subscriptions ending in 1-3 days.
+    pub async fn send_trial_ending_reminders(&self) -> Result<u32> {
+        use chrono::Datelike;
+        let subs = self.billing_repo.list_trials_ending_soon(3).await?;
+        let mut sent = 0u32;
+        for (sub, plan_name) in subs {
+            let user = match self.user_repo.get_by_id(sub.user_id).await.ok().flatten() {
+                Some(u) => u,
+                None => continue,
+            };
+            let trial_end = match sub.trial_end {
+                Some(t) => t,
+                None => continue,
+            };
+            let trial_end_str = format!(
+                "{}-{:02}-{:02}",
+                trial_end.year(),
+                trial_end.month(),
+                trial_end.day()
+            );
+            let billing_url = sub.org_id.and_then(|org_id| {
+                self.frontend_url
+                    .as_ref()
+                    .map(|base| format!("{}/orgs/{}?tab=billing", base.trim_end_matches('/'), org_id.0))
+            });
+            if let Err(e) = self
+                .email_sender
+                .send_trial_ending_soon(
+                    &user.email,
+                    &plan_name,
+                    &trial_end_str,
+                    billing_url.as_deref(),
+                )
+                .await
+            {
+                tracing::warn!(sub = %sub.stripe_subscription_id, "Trial reminder email failed: {:?}", e);
+            } else {
+                sent += 1;
+            }
+        }
+        Ok(sent)
+    }
+
+    /// Send past-due reminders for subscriptions with status past_due.
+    pub async fn send_past_due_reminders(&self) -> Result<u32> {
+        let subs = self.billing_repo.list_past_due_subscriptions().await?;
+        let mut sent = 0u32;
+        for sub in subs {
+            let user = match self.user_repo.get_by_id(sub.user_id).await.ok().flatten() {
+                Some(u) => u,
+                None => continue,
+            };
+            let hosted_url = self
+                .billing_repo
+                .get_latest_payment_failed_invoice_url(sub.id)
+                .await
+                .ok()
+                .flatten();
+            let billing_url = sub.org_id.and_then(|org_id| {
+                self.frontend_url
+                    .as_ref()
+                    .map(|base| format!("{}/orgs/{}?tab=billing", base.trim_end_matches('/'), org_id.0))
+            });
+            if let Err(e) = self
+                .email_sender
+                .send_past_due_reminder(
+                    &user.email,
+                    hosted_url.as_deref(),
+                    billing_url.as_deref(),
+                )
+                .await
+            {
+                tracing::warn!(sub = %sub.stripe_subscription_id, "Past-due reminder email failed: {:?}", e);
+            } else {
+                sent += 1;
+            }
+        }
+        Ok(sent)
+    }
+
     /// Get the current user's subscription plan name (e.g. "Pro") if they have an active
     /// subscription in any of their orgs. Returns the highest-tier plan.
     pub async fn get_user_subscription_plan_name(
@@ -65,15 +166,20 @@ impl BillingService {
     pub async fn list_transactions(
         &self,
         user_id: UserId,
+        limit: i64,
+        offset: i64,
     ) -> Result<(
         Vec<crate::billing::repository::SubscriptionTransaction>,
         Vec<crate::billing::repository::CreditTransaction>,
     )> {
         let sub = self
             .billing_repo
-            .list_subscription_transactions(user_id)
+            .list_subscription_transactions(user_id, limit, offset)
             .await?;
-        let credit = self.billing_repo.list_credit_transactions(user_id).await?;
+        let credit = self
+            .billing_repo
+            .list_credit_transactions(user_id, limit, offset)
+            .await?;
         Ok((sub, credit))
     }
 
@@ -110,17 +216,19 @@ impl BillingService {
     pub async fn list_transactions_by_org(
         &self,
         org_id: OrgId,
+        limit: i64,
+        offset: i64,
     ) -> Result<(
         Vec<crate::billing::repository::SubscriptionTransaction>,
         Vec<crate::billing::repository::CreditTransaction>,
     )> {
         let sub = self
             .billing_repo
-            .list_subscription_transactions_by_org(org_id)
+            .list_subscription_transactions_by_org(org_id, limit, offset)
             .await?;
         let credit = self
             .billing_repo
-            .list_credit_transactions_by_org(org_id)
+            .list_credit_transactions_by_org(org_id, limit, offset)
             .await?;
         Ok((sub, credit))
     }
@@ -130,6 +238,9 @@ impl BillingService {
         billing_repo: BillingRepository,
         user_repo: UserRepository,
         org_repo: OrgRepository,
+        email_sender: Arc<dyn EmailSender>,
+        job_queue: Arc<ObservantJobQueue>,
+        frontend_url: Option<String>,
     ) -> Self {
         let stripe_client = Client::new(stripe_config.secret_key.clone());
         Self {
@@ -138,6 +249,9 @@ impl BillingService {
             billing_repo,
             user_repo,
             org_repo,
+            email_sender,
+            job_queue,
+            frontend_url,
         }
     }
 
@@ -173,7 +287,7 @@ impl BillingService {
             let price_id_parsed = price_id
                 .parse::<PriceId>()
                 .map_err(|_| ApiError::InvalidRequest("Invalid price id".into()))?;
-            match Price::retrieve(&self.stripe_client, &price_id_parsed, &[]).await {
+            match stripe_timeout(Price::retrieve(&self.stripe_client, &price_id_parsed, &[])).await {
                 Ok(price) => {
                     let is_recurring = price
                         .type_
@@ -232,7 +346,7 @@ impl BillingService {
                     .map_err(|e| ApiError::InternalError(anyhow::anyhow!("{}", e)))?,
             )
         } else {
-            let customer = Customer::create(
+            let customer = stripe_timeout(Customer::create(
                 &self.stripe_client,
                 CreateCustomer {
                     email: Some(&user.email),
@@ -242,9 +356,8 @@ impl BillingService {
                     )])),
                     ..Default::default()
                 },
-            )
-            .await
-            .map_err(|e| ApiError::InternalError(anyhow::anyhow!("Stripe: {}", e)))?;
+            ))
+            .await?;
 
             self.user_repo
                 .update_stripe_customer_id(user_id, customer.id.as_str())
@@ -256,9 +369,7 @@ impl BillingService {
 
         params.customer = Some(customer_id.unwrap());
 
-        let session = CheckoutSession::create(&self.stripe_client, params)
-            .await
-            .map_err(|e| ApiError::InternalError(anyhow::anyhow!("Stripe: {}", e)))?;
+        let session = stripe_timeout(CheckoutSession::create(&self.stripe_client, params)).await?;
 
         session
             .url
@@ -289,11 +400,20 @@ impl BillingService {
         let mut params = CreateBillingPortalSession::new(customer);
         params.return_url = Some(return_url);
 
-        let session = stripe::BillingPortalSession::create(&self.stripe_client, params)
-            .await
-            .map_err(|e| ApiError::InternalError(anyhow::anyhow!("Stripe: {}", e)))?;
+        let session =
+            stripe_timeout(stripe::BillingPortalSession::create(&self.stripe_client, params))
+                .await?;
 
         Ok(session.url.to_string())
+    }
+
+    /// Delete a Stripe customer (GDPR erasure). Cancels active subscriptions. Use with caution.
+    pub async fn delete_stripe_customer(&self, customer_id: &str) -> Result<(), ApiError> {
+        let cid = customer_id
+            .parse::<stripe::CustomerId>()
+            .map_err(|e| ApiError::InternalError(anyhow::anyhow!("{}", e)))?;
+        stripe_timeout(Customer::delete(&self.stripe_client, &cid)).await?;
+        Ok(())
     }
 
     /// Cancel subscription at period end (customer keeps access until current_period_end).
@@ -335,9 +455,7 @@ impl BillingService {
             ..Default::default()
         };
 
-        Subscription::update(&self.stripe_client, &sub_id, params)
-            .await
-            .map_err(|e| ApiError::InternalError(anyhow::anyhow!("Stripe: {}", e)))?;
+        stripe_timeout(Subscription::update(&self.stripe_client, &sub_id, params)).await?;
 
         Ok(())
     }
@@ -371,9 +489,7 @@ impl BillingService {
             .map_err(|e| ApiError::InternalError(anyhow::anyhow!("{}", e)))?;
 
         let params = CancelSubscription::default();
-        Subscription::cancel(&self.stripe_client, &sub_id, params)
-            .await
-            .map_err(|e| ApiError::InternalError(anyhow::anyhow!("Stripe: {}", e)))?;
+        stripe_timeout(Subscription::cancel(&self.stripe_client, &sub_id, params)).await?;
 
         Ok(())
     }
@@ -414,9 +530,8 @@ impl BillingService {
             .parse::<SubscriptionId>()
             .map_err(|e| ApiError::InternalError(anyhow::anyhow!("{}", e)))?;
 
-        let stripe_sub = Subscription::retrieve(&self.stripe_client, &sub_id, &[])
-            .await
-            .map_err(|e| ApiError::InternalError(anyhow::anyhow!("Stripe: {}", e)))?;
+        let stripe_sub =
+            stripe_timeout(Subscription::retrieve(&self.stripe_client, &sub_id, &[])).await?;
 
         let subscription_item_id = stripe_sub
             .items
@@ -433,15 +548,13 @@ impl BillingService {
             ..Default::default()
         };
 
+        // Stripe defaults to create_prorations; proration applies on plan change.
         let params = UpdateSubscription {
             items: Some(vec![item]),
             ..Default::default()
         };
-        // Stripe prorates by default; upgrade/downgrade applies at next billing cycle or creates proration
 
-        Subscription::update(&self.stripe_client, &sub_id, params)
-            .await
-            .map_err(|e| ApiError::InternalError(anyhow::anyhow!("Stripe: {}", e)))?;
+        stripe_timeout(Subscription::update(&self.stripe_client, &sub_id, params)).await?;
 
         self.billing_repo
             .update_subscription_plan(&sub.stripe_subscription_id, plan.id)
@@ -520,6 +633,7 @@ impl BillingService {
             "invoice.payment_succeeded" | "invoice.payment_failed" => {
                 self.handle_invoice_event(event).await
             }
+            "charge.refunded" => self.handle_charge_refunded(event).await,
             "product.created" | "product.updated" | "product.deleted" | "price.created"
             | "price.updated" | "price.deleted" => self.handle_product_price_event(event).await,
             _ => Ok(()),
@@ -583,11 +697,12 @@ impl BillingService {
                 let customer_id_parsed = customer_id
                     .parse::<stripe::CustomerId>()
                     .map_err(|_| ApiError::InvalidRequest("Invalid customer id".into()))?;
-                let customer = Customer::retrieve(&self.stripe_client, &customer_id_parsed, &[])
-                    .await
-                    .map_err(|e| {
-                        ApiError::InternalError(anyhow::anyhow!("Stripe Customer retrieve: {}", e))
-                    })?;
+                let customer = stripe_timeout(Customer::retrieve(
+                    &self.stripe_client,
+                    &customer_id_parsed,
+                    &[],
+                ))
+                .await?;
                 let user_id_str = customer
                     .metadata
                     .as_ref()
@@ -633,8 +748,12 @@ impl BillingService {
                 if let Some(session_id) = session.get("id").and_then(|v| v.as_str()) {
                     if let Ok(parsed) = session_id.parse::<stripe::CheckoutSessionId>() {
                         let params = RetrieveCheckoutSessionLineItems::default();
-                        if let Ok(list) =
-                            CheckoutSession::retrieve_line_items(&self.stripe_client, &parsed, &params).await
+                        if let Ok(list) = stripe_timeout(CheckoutSession::retrieve_line_items(
+                            &self.stripe_client,
+                            &parsed,
+                            &params,
+                        ))
+                        .await
                         {
                             if let Some(first) = list.data.first() {
                                 if let Some(ref price) = first.price {
@@ -658,7 +777,7 @@ impl BillingService {
                 None => {
                     let orgs = self
                         .org_repo
-                        .get_user_orgs(user_id)
+                        .get_user_orgs(user_id, 1, 0)
                         .await
                         .map_err(ApiError::InternalError)?;
                     orgs.into_iter()
@@ -699,7 +818,8 @@ impl BillingService {
                     // Fetch Stripe subscription and sync period, trial, status, etc. immediately
                     if let Ok(parsed) = sub_id.parse::<SubscriptionId>() {
                         if let Ok(stripe_sub) =
-                            Subscription::retrieve(&self.stripe_client, &parsed, &[]).await
+                            stripe_timeout(Subscription::retrieve(&self.stripe_client, &parsed, &[]))
+                                .await
                         {
                             let sub_json = serde_json::to_value(&stripe_sub).ok();
                             if let Some(obj) = sub_json.as_ref() {
@@ -811,6 +931,8 @@ impl BillingService {
             let (tokens, package_id) = package.map(|p| (p.tokens, Some(p.id))).unwrap_or((0, None));
 
             let receipt_url = Self::extract_receipt_url(session);
+            let payment_intent_id = Self::extract_id(session.get("payment_intent"), "id")
+                .or_else(|| session.get("payment_intent").and_then(|v| v.as_str()).map(String::from));
 
             let org = org_id
                 .ok_or_else(|| ApiError::InvalidRequest("Missing org_id in metadata".into()))?;
@@ -824,7 +946,7 @@ impl BillingService {
                     amount_total,
                     currency,
                     "purchase",
-                    None,
+                    payment_intent_id.as_deref(),
                     None,
                     receipt_url.as_deref(),
                 )
@@ -865,9 +987,12 @@ impl BillingService {
                 let customer_id_parsed = customer_id
                     .parse::<stripe::CustomerId>()
                     .map_err(|_| ApiError::InvalidRequest("Invalid customer id".into()))?;
-                let customer = Customer::retrieve(&self.stripe_client, &customer_id_parsed, &[])
-                    .await
-                    .map_err(|e| ApiError::InternalError(anyhow::anyhow!("Stripe Customer retrieve: {}", e)))?;
+                let customer = stripe_timeout(Customer::retrieve(
+                    &self.stripe_client,
+                    &customer_id_parsed,
+                    &[],
+                ))
+                .await?;
                 let user_id_str = customer
                     .metadata
                     .as_ref()
@@ -889,7 +1014,7 @@ impl BillingService {
                     None => {
                         let orgs = self
                             .org_repo
-                            .get_user_orgs(user_id)
+                            .get_user_orgs(user_id, 1, 0)
                             .await
                             .map_err(ApiError::InternalError)?;
                         orgs.into_iter()
@@ -1198,6 +1323,86 @@ impl BillingService {
         Ok(())
     }
 
+    async fn handle_charge_refunded(&self, event: &serde_json::Value) -> Result<(), ApiError> {
+        let charge = event
+            .get("data")
+            .and_then(|d| d.get("object"))
+            .ok_or_else(|| ApiError::InvalidRequest("Missing charge object".into()))?;
+
+        let payment_intent_id = Self::extract_id(charge.get("payment_intent"), "id")
+            .or_else(|| charge.get("payment_intent").and_then(|v| v.as_str()).map(String::from));
+
+        let Some(pi_id) = payment_intent_id else {
+            return Ok(());
+        };
+
+        if self
+            .billing_repo
+            .has_refund_for_payment_intent(&pi_id)
+            .await
+            .map_err(ApiError::InternalError)?
+        {
+            return Ok(());
+        }
+
+        let Some((user_id, org_id, amount_tokens, amount_cents)) = self
+            .billing_repo
+            .get_purchase_by_stripe_payment_intent_id(&pi_id)
+            .await
+            .map_err(ApiError::InternalError)?
+        else {
+            return Ok(());
+        };
+
+        let amount_refunded = charge.get("amount_refunded").and_then(|v| v.as_i64()).unwrap_or(0);
+        let amount = charge.get("amount").and_then(|v| v.as_i64()).unwrap_or(1);
+        let tokens_to_reverse = if amount > 0 {
+            (amount_refunded as f64 / amount as f64 * amount_tokens as f64) as i64
+        } else {
+            amount_tokens
+        };
+
+        if tokens_to_reverse <= 0 {
+            return Ok(());
+        }
+
+        let refund_amount_cents = if amount > 0 {
+            amount_refunded
+        } else {
+            amount_cents
+        };
+
+        self.billing_repo
+            .add_credit_transaction(
+                user_id,
+                org_id,
+                None,
+                -tokens_to_reverse,
+                -refund_amount_cents,
+                "usd",
+                "refund",
+                Some(&pi_id),
+                charge.get("id").and_then(|v| v.as_str()),
+                None,
+            )
+            .await
+            .map_err(ApiError::InternalError)?;
+
+        self.billing_repo
+            .upsert_org_credits(org_id, -tokens_to_reverse)
+            .await
+            .map_err(ApiError::InternalError)?;
+
+        info!(
+            payment_intent = %pi_id,
+            org_id = %org_id.0,
+            tokens_reversed = tokens_to_reverse,
+            "Processed refund for token purchase"
+        );
+
+        Ok(())
+    }
+
     async fn handle_invoice_event(&self, event: &serde_json::Value) -> Result<(), ApiError> {
         let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
         let inv = event
@@ -1294,6 +1499,36 @@ impl BillingService {
                     invoice_id = ?stripe_invoice_id,
                     "Invoice payment failed (dunning: Stripe will retry automatically)"
                 );
+
+                // Notify user asynchronously
+                let to_email = match &billing_email {
+                    Some(email) => Some(email.clone()),
+                    None => self
+                        .user_repo
+                        .get_by_id(db_sub.user_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|u| u.email),
+                };
+                if let Some(to) = to_email {
+                    let email_sender = self.email_sender.clone();
+                    let hosted = hosted_url.clone();
+                    let update_url = db_sub.org_id.and_then(|org_id| {
+                        self.frontend_url
+                            .as_ref()
+                            .map(|base| format!("{}/orgs/{}?tab=billing", base.trim_end_matches('/'), org_id.0))
+                    });
+                    self.job_queue.spawn_result("send_payment_failed", move || {
+                        let es = email_sender.clone();
+                        let t = to.clone();
+                        let h = hosted.clone();
+                        let u = update_url.clone();
+                        async move {
+                            es.send_payment_failed(&t, h.as_deref(), u.as_deref()).await
+                        }
+                    });
+                }
             }
             _ => {}
         }
@@ -1327,10 +1562,16 @@ impl BillingService {
             .parse::<PriceId>()
             .map_err(|_| ApiError::InvalidRequest("Invalid price id".into()))?;
 
-        let price = match Price::retrieve(&self.stripe_client, &price_id, &["product"]).await {
+        let price = match stripe_timeout(Price::retrieve(
+            &self.stripe_client,
+            &price_id,
+            &["product"],
+        ))
+        .await
+        {
             Ok(p) => p,
             Err(e) => {
-                warn!("Stripe Price retrieve failed ({}): {}", price_id_str, e);
+                warn!("Stripe Price retrieve failed ({}): {:?}", price_id_str, e);
                 return Ok(());
             }
         };
@@ -1374,7 +1615,7 @@ impl BillingService {
                 (product.id.to_string(), name, product.active.unwrap_or(true) && !product.deleted, meta)
             }
             Some(stripe::Expandable::Id(pid)) => {
-                match Product::retrieve(&self.stripe_client, pid, &[]).await {
+                match stripe_timeout(Product::retrieve(&self.stripe_client, pid, &[])).await {
                     Ok(product) => {
                         let name = product
                             .name
@@ -1391,7 +1632,7 @@ impl BillingService {
                         )
                     }
                     Err(e) => {
-                        warn!("Stripe Product retrieve failed ({}): {}", pid, e);
+                        warn!("Stripe Product retrieve failed ({}): {:?}", pid, e);
                         return Ok(());
                     }
                 }
@@ -1508,10 +1749,10 @@ impl BillingService {
         list_params.expand = &["data.product"];
         list_params.limit = Some(100);
 
-        let mut prices = match Price::list(&self.stripe_client, &list_params).await {
+        let mut prices = match stripe_timeout(Price::list(&self.stripe_client, &list_params)).await {
             Ok(list) => list.data,
             Err(e) => {
-                warn!("Stripe Price list failed for product {}: {}", product_id, e);
+                warn!("Stripe Price list failed for product {}: {:?}", product_id, e);
                 return Ok(());
             }
         };
@@ -1523,10 +1764,10 @@ impl BillingService {
                 }
             }
             list_params.starting_after = prices.last().map(|p| p.id.clone());
-            prices = match Price::list(&self.stripe_client, &list_params).await {
+            prices = match stripe_timeout(Price::list(&self.stripe_client, &list_params)).await {
                 Ok(list) => list.data,
                 Err(e) => {
-                    warn!("Stripe Price list pagination failed: {}", e);
+                    warn!("Stripe Price list pagination failed: {:?}", e);
                     break;
                 }
             };

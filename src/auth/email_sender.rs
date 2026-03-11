@@ -3,14 +3,19 @@
 //! ConsoleEmailSender logs to tracing (dev). SmtpEmailSender sends via SMTP with HTML and plain text templates.
 
 use std::future::Future;
+use std::time::Duration;
+
+const SMTP_TIMEOUT: Duration = Duration::from_secs(15);
 
 use askama::Template;
 
 use crate::auth::email_templates::{
-    LoginCodeHtml, LoginCodePlain, PasswordResetHtml, PasswordResetPlain,
+    LoginCodeHtml, LoginCodePlain, PastDueReminderHtml, PastDueReminderPlain, PaymentFailedHtml,
+    PaymentFailedPlain, PasswordResetHtml, PasswordResetPlain, TrialEndingSoonHtml,
+    TrialEndingSoonPlain,
 };
 
-/// Sends transactional emails for auth (login codes, password reset).
+/// Sends transactional emails for auth (login codes, password reset) and billing (payment failed).
 pub trait EmailSender: Send + Sync {
     /// Sends a 6-digit login code to the given email.
     fn send_login_code<'a>(
@@ -24,6 +29,31 @@ pub trait EmailSender: Send + Sync {
         &'a self,
         to: &'a str,
         reset_link: &'a str,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send + 'a>>;
+
+    /// Sends a payment failed notification with invoice URL and optional update payment link.
+    fn send_payment_failed<'a>(
+        &'a self,
+        to: &'a str,
+        hosted_invoice_url: Option<&'a str>,
+        update_payment_url: Option<&'a str>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send + 'a>>;
+
+    /// Sends a trial ending soon reminder (plan_name, formatted trial_end date, optional billing URL).
+    fn send_trial_ending_soon<'a>(
+        &'a self,
+        to: &'a str,
+        plan_name: &'a str,
+        trial_end: &'a str,
+        billing_url: Option<&'a str>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send + 'a>>;
+
+    /// Sends a past-due reminder (optional hosted invoice URL, optional billing URL).
+    fn send_past_due_reminder<'a>(
+        &'a self,
+        to: &'a str,
+        hosted_invoice_url: Option<&'a str>,
+        billing_url: Option<&'a str>,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send + 'a>>;
 }
 
@@ -50,6 +80,59 @@ impl EmailSender for ConsoleEmailSender {
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send + 'a>> {
         Box::pin(async move {
             tracing::info!(to = %to, reset_link = %reset_link, "Would send password reset email (SMTP not configured)");
+            Ok(())
+        })
+    }
+
+    fn send_payment_failed<'a>(
+        &'a self,
+        to: &'a str,
+        hosted_invoice_url: Option<&'a str>,
+        update_payment_url: Option<&'a str>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send + 'a>> {
+        Box::pin(async move {
+            tracing::info!(
+                to = %to,
+                hosted_invoice_url = ?hosted_invoice_url,
+                update_payment_url = ?update_payment_url,
+                "Would send payment failed email (SMTP not configured)"
+            );
+            Ok(())
+        })
+    }
+
+    fn send_trial_ending_soon<'a>(
+        &'a self,
+        to: &'a str,
+        plan_name: &'a str,
+        trial_end: &'a str,
+        billing_url: Option<&'a str>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send + 'a>> {
+        Box::pin(async move {
+            tracing::info!(
+                to = %to,
+                plan_name = %plan_name,
+                trial_end = %trial_end,
+                billing_url = ?billing_url,
+                "Would send trial ending soon email (SMTP not configured)"
+            );
+            Ok(())
+        })
+    }
+
+    fn send_past_due_reminder<'a>(
+        &'a self,
+        to: &'a str,
+        hosted_invoice_url: Option<&'a str>,
+        billing_url: Option<&'a str>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send + 'a>> {
+        Box::pin(async move {
+            tracing::info!(
+                to = %to,
+                hosted_invoice_url = ?hosted_invoice_url,
+                billing_url = ?billing_url,
+                "Would send past-due reminder email (SMTP not configured)"
+            );
             Ok(())
         })
     }
@@ -101,7 +184,9 @@ impl EmailSender for SmtpEmailSender {
                 .credentials(creds)
                 .build();
 
-            mailer.send(email).await?;
+            tokio::time::timeout(SMTP_TIMEOUT, mailer.send(email))
+                .await
+                .map_err(|_| anyhow::anyhow!("SMTP send timed out"))??;
             Ok(())
         })
     }
@@ -146,7 +231,166 @@ impl EmailSender for SmtpEmailSender {
                 .credentials(creds)
                 .build();
 
-            mailer.send(email).await?;
+            tokio::time::timeout(SMTP_TIMEOUT, mailer.send(email))
+                .await
+                .map_err(|_| anyhow::anyhow!("SMTP send timed out"))??;
+            Ok(())
+        })
+    }
+
+    fn send_payment_failed<'a>(
+        &'a self,
+        to: &'a str,
+        hosted_invoice_url: Option<&'a str>,
+        update_payment_url: Option<&'a str>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send + 'a>> {
+        let config = self.config.clone();
+        let to = to.to_string();
+        let hosted_invoice_url = hosted_invoice_url.map(String::from);
+        let update_payment_url = update_payment_url.map(String::from);
+        Box::pin(async move {
+            use lettre::message::MultiPart;
+            use lettre::transport::smtp::authentication::Credentials;
+            use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
+
+            let plain = PaymentFailedPlain {
+                hosted_invoice_url: hosted_invoice_url.as_deref(),
+                update_payment_url: update_payment_url.as_deref(),
+            }
+            .render()?;
+            let html = PaymentFailedHtml {
+                hosted_invoice_url: hosted_invoice_url.as_deref(),
+                update_payment_url: update_payment_url.as_deref(),
+            }
+            .render()?;
+            let email = Message::builder()
+                .from(
+                    config
+                        .from
+                        .parse()
+                        .map_err(|e: lettre::address::AddressError| anyhow::anyhow!("{}", e))?,
+                )
+                .to(to
+                    .parse()
+                    .map_err(|e: lettre::address::AddressError| anyhow::anyhow!("{}", e))?)
+                .subject("Payment failed - action required")
+                .multipart(MultiPart::alternative_plain_html(plain, html))?;
+
+            let creds = Credentials::new(config.user.clone(), config.password.clone());
+            let mailer = AsyncSmtpTransport::<Tokio1Executor>::relay(&config.host)?
+                .port(config.port)
+                .credentials(creds)
+                .build();
+
+            tokio::time::timeout(SMTP_TIMEOUT, mailer.send(email))
+                .await
+                .map_err(|_| anyhow::anyhow!("SMTP send timed out"))??;
+            Ok(())
+        })
+    }
+
+    fn send_trial_ending_soon<'a>(
+        &'a self,
+        to: &'a str,
+        plan_name: &'a str,
+        trial_end: &'a str,
+        billing_url: Option<&'a str>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send + 'a>> {
+        let config = self.config.clone();
+        let to = to.to_string();
+        let plan_name = plan_name.to_string();
+        let trial_end = trial_end.to_string();
+        let billing_url = billing_url.map(String::from);
+        Box::pin(async move {
+            use lettre::message::MultiPart;
+            use lettre::transport::smtp::authentication::Credentials;
+            use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
+
+            let plain = TrialEndingSoonPlain {
+                plan_name: &plan_name,
+                trial_end: &trial_end,
+                billing_url: billing_url.as_deref(),
+            }
+            .render()?;
+            let html = TrialEndingSoonHtml {
+                plan_name: &plan_name,
+                trial_end: &trial_end,
+                billing_url: billing_url.as_deref(),
+            }
+            .render()?;
+            let email = Message::builder()
+                .from(
+                    config
+                        .from
+                        .parse()
+                        .map_err(|e: lettre::address::AddressError| anyhow::anyhow!("{}", e))?,
+                )
+                .to(to
+                    .parse()
+                    .map_err(|e: lettre::address::AddressError| anyhow::anyhow!("{}", e))?)
+                .subject("Your trial ends soon")
+                .multipart(MultiPart::alternative_plain_html(plain, html))?;
+
+            let creds = Credentials::new(config.user.clone(), config.password.clone());
+            let mailer = AsyncSmtpTransport::<Tokio1Executor>::relay(&config.host)?
+                .port(config.port)
+                .credentials(creds)
+                .build();
+
+            tokio::time::timeout(SMTP_TIMEOUT, mailer.send(email))
+                .await
+                .map_err(|_| anyhow::anyhow!("SMTP send timed out"))??;
+            Ok(())
+        })
+    }
+
+    fn send_past_due_reminder<'a>(
+        &'a self,
+        to: &'a str,
+        hosted_invoice_url: Option<&'a str>,
+        billing_url: Option<&'a str>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send + 'a>> {
+        let config = self.config.clone();
+        let to = to.to_string();
+        let hosted_invoice_url = hosted_invoice_url.map(String::from);
+        let billing_url = billing_url.map(String::from);
+        Box::pin(async move {
+            use lettre::message::MultiPart;
+            use lettre::transport::smtp::authentication::Credentials;
+            use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
+
+            let plain = PastDueReminderPlain {
+                hosted_invoice_url: hosted_invoice_url.as_deref(),
+                billing_url: billing_url.as_deref(),
+            }
+            .render()?;
+            let html = PastDueReminderHtml {
+                hosted_invoice_url: hosted_invoice_url.as_deref(),
+                billing_url: billing_url.as_deref(),
+            }
+            .render()?;
+            let email = Message::builder()
+                .from(
+                    config
+                        .from
+                        .parse()
+                        .map_err(|e: lettre::address::AddressError| anyhow::anyhow!("{}", e))?,
+                )
+                .to(to
+                    .parse()
+                    .map_err(|e: lettre::address::AddressError| anyhow::anyhow!("{}", e))?)
+                .subject("Subscription payment past due")
+                .multipart(MultiPart::alternative_plain_html(plain, html))?;
+
+            let creds = Credentials::new(config.user.clone(), config.password.clone());
+            let mailer = AsyncSmtpTransport::<Tokio1Executor>::relay(&config.host)?
+                .port(config.port)
+                .credentials(creds)
+                .build();
+
+            tokio::time::timeout(SMTP_TIMEOUT, mailer.send(email))
+                .await
+                .map_err(|_| anyhow::anyhow!("SMTP send timed out"))??;
             Ok(())
         })
     }

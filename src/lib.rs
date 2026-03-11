@@ -5,8 +5,10 @@ use utoipa_swagger_ui::SwaggerUi;
 pub mod auth;
 pub mod billing;
 pub mod cfg;
+pub mod feature_flags;
 pub mod common;
 pub mod db;
+pub mod jobs;
 pub mod middleware;
 pub mod org;
 pub mod routes;
@@ -28,6 +30,11 @@ pub use db::*;
         auth::routes::google_redirect,
         auth::routes::google_callback,
         auth::routes::me,
+        auth::routes::me_export,
+        auth::routes::me_delete,
+        auth::routes::me_delete_permanent,
+        auth::routes::restore_request,
+        auth::routes::restore,
         auth::routes::password_reset_request,
         auth::routes::password_reset_confirm,
         auth::routes::refresh,
@@ -65,6 +72,11 @@ pub use db::*;
         auth::api_key_routes::list_keys,
         auth::api_key_routes::revoke_key,
         auth::api_key_routes::rotate_key,
+        feature_flags::routes::list_for_org,
+        feature_flags::routes::list_all,
+        feature_flags::routes::set_flag,
+        routes::job_stats::job_stats,
+        routes::impersonate::impersonate,
     ),
     components(
         schemas(
@@ -95,6 +107,15 @@ pub use db::*;
             auth::api_key_routes::CreateApiKeyRequest,
             auth::api_key_routes::CreateApiKeyResponse,
             auth::api_key_routes::ApiKeyInfoResponse,
+            auth::routes::DeletePermanentRequest,
+            auth::routes::RestoreRequest,
+            auth::routes::RestoreConfirmRequest,
+            feature_flags::routes::FeatureFlagItem,
+            feature_flags::routes::FeatureFlagEffectiveItem,
+            feature_flags::routes::SetFlagRequest,
+            routes::impersonate::ImpersonateRequest,
+            routes::impersonate::ImpersonateResponse,
+            routes::job_stats::JobStatsResponse,
         )
     ),
     modifiers(&SecurityAddon)
@@ -133,10 +154,14 @@ impl utoipa::Modify for SecurityAddon {
     }
 }
 
+use std::sync::Arc;
+
 use crate::auth::rbac_service::RbacService;
 use crate::auth::service::AuthService;
 use crate::billing::service::BillingService;
+use crate::feature_flags::service::FeatureFlagService;
 use crate::org::service::OrgService;
+use crate::services::ObservantJobQueue;
 use crate::storage::StorageService;
 
 #[derive(Clone)]
@@ -149,9 +174,13 @@ pub struct AppState {
     pub storage_service: Option<StorageService>,
     pub org_service: OrgService,
     pub rbac_service: RbacService,
+    pub feature_flag_service: FeatureFlagService,
+    pub job_queue: Arc<ObservantJobQueue>,
 }
 
 pub fn router(cfg: Config, db: Db, storage_service: Option<StorageService>) -> Router {
+    let job_queue = Arc::new(ObservantJobQueue::default());
+
     let auth_service = cfg.jwt_secret.as_ref().map(|_| {
         use crate::auth::repository::{EmailCodeRepository, RbacRepository, UserRepository};
         use crate::auth::{ConsoleEmailSender, EmailSender};
@@ -181,13 +210,27 @@ pub fn router(cfg: Config, db: Db, storage_service: Option<StorageService>) -> R
 
     let billing_service = cfg.stripe.as_ref().map(|stripe_cfg| {
         use crate::auth::repository::UserRepository;
+        use crate::auth::{ConsoleEmailSender, EmailSender};
         use crate::billing::repository::BillingRepository;
         use crate::org::repository::OrgRepository;
+        use std::sync::Arc;
 
         let billing_repo = BillingRepository::new(db.pool.clone());
         let user_repo = UserRepository::new(db.pool.clone());
         let org_repo = OrgRepository::new(db.pool.clone());
-        BillingService::new(stripe_cfg.clone(), billing_repo, user_repo, org_repo)
+        let email_sender: Arc<dyn EmailSender> = match &cfg.smtp {
+            Some(smtp) => Arc::new(crate::auth::SmtpEmailSender::new(smtp.clone())),
+            None => Arc::new(ConsoleEmailSender),
+        };
+        BillingService::new(
+            stripe_cfg.clone(),
+            billing_repo,
+            user_repo,
+            org_repo,
+            email_sender,
+            job_queue.clone(),
+            cfg.frontend_url.clone(),
+        )
     });
 
     let org_service = {
@@ -204,6 +247,13 @@ pub fn router(cfg: Config, db: Db, storage_service: Option<StorageService>) -> R
 
         let rbac_repo = RbacRepository::new(db.pool.clone());
         RbacService::new(rbac_repo)
+    };
+
+    let feature_flag_service = {
+        use crate::feature_flags::repository::FeatureFlagRepository;
+
+        let repo = FeatureFlagRepository::new(db.pool.clone());
+        FeatureFlagService::new(repo)
     };
 
     let api_key_service = cfg.jwt_secret.as_ref().map(|_| {
@@ -227,30 +277,12 @@ pub fn router(cfg: Config, db: Db, storage_service: Option<StorageService>) -> R
         storage_service,
         org_service,
         rbac_service,
+        feature_flag_service,
+        job_queue,
     };
 
-    // Background job: reconcile subscriptions that should be canceled (cancel_at_period_end + period ended).
-    // Fallback when webhooks are missed. Runs hourly.
-    if let Some(billing) = app_state.billing_service.as_ref() {
-        let billing = billing.clone();
-        tokio::spawn(async move {
-            use std::time::Duration;
-            let mut interval = tokio::time::interval(Duration::from_secs(3600));
-            interval.tick().await; // skip first immediate tick
-            loop {
-                interval.tick().await;
-                match billing.reconcile_stale_cancel_at_period_end().await {
-                    Ok(n) if n > 0 => {
-                        tracing::info!(count = n, "Subscription reconciliation: marked stale subscriptions as canceled");
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!("Subscription reconciliation failed: {:?}", e);
-                    }
-                }
-            }
-        });
-    }
+    // Scheduled background jobs: reconciliation, cleanup, reminder emails.
+    jobs::spawn_all(app_state.clone());
 
     // Middleware that adds high level tracing to a Service.
     // Trace comes with good defaults but also supports customizing many aspects of the output:
@@ -294,6 +326,7 @@ pub fn router(cfg: Config, db: Db, storage_service: Option<StorageService>) -> R
     };
     app.layer(normalize_path_layer)
         .layer(cors_layer)
+        .layer(middleware::request_body_limit_layer())
         .layer(timeout_layer)
         .layer(propagate_request_id_layer)
         .layer(trace_layer)

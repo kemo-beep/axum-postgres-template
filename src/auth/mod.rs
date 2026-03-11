@@ -1,5 +1,8 @@
 //! Authentication and authorization modules.
 
+pub mod account_deletion;
+pub mod audit;
+pub mod account_export;
 pub mod api_key_repository;
 pub mod api_key_routes;
 pub mod api_key_service;

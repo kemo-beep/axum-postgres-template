@@ -87,16 +87,24 @@ impl ApiKeyRepository {
     }
 
     /// List all API keys for a user (without key material).
-    pub async fn list_by_user_id(&self, user_id: UserId) -> Result<Vec<ApiKey>> {
+    pub async fn list_by_user_id(
+        &self,
+        user_id: UserId,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<ApiKey>> {
         let rows = sqlx::query(
             r#"
             SELECT id, user_id, name, org_id, workspace_id, permissions, expires_at, created_at, updated_at, last_used_at
             FROM api_keys
             WHERE user_id = $1
             ORDER BY created_at DESC
+            LIMIT $2 OFFSET $3
             "#,
         )
         .bind(user_id.0)
+        .bind(limit)
+        .bind(offset)
         .fetch_all(&self.pool)
         .await?;
 
@@ -138,6 +146,15 @@ impl ApiKeyRepository {
         .await?;
 
         Ok(row.map(row_to_api_key))
+    }
+
+    /// Delete api_key_usage_log rows older than the given timestamp. Returns number of rows deleted.
+    pub async fn delete_usage_log_older_than(&self, before: chrono::DateTime<chrono::Utc>) -> Result<u64> {
+        let result = sqlx::query("DELETE FROM api_key_usage_log WHERE created_at < $1")
+            .bind(before)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
     }
 
     /// Insert a usage log entry. Call from service with tokio::spawn for non-blocking audit.

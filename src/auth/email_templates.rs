@@ -25,3 +25,47 @@ pub struct PasswordResetPlain<'a> {
 pub struct PasswordResetHtml<'a> {
     pub reset_link: &'a str,
 }
+
+#[derive(Template)]
+#[template(path = "emails/payment_failed.txt")]
+pub struct PaymentFailedPlain<'a> {
+    pub hosted_invoice_url: Option<&'a str>,
+    pub update_payment_url: Option<&'a str>,
+}
+
+#[derive(Template)]
+#[template(path = "emails/payment_failed.html")]
+pub struct PaymentFailedHtml<'a> {
+    pub hosted_invoice_url: Option<&'a str>,
+    pub update_payment_url: Option<&'a str>,
+}
+
+#[derive(Template)]
+#[template(path = "emails/trial_ending_soon.txt")]
+pub struct TrialEndingSoonPlain<'a> {
+    pub plan_name: &'a str,
+    pub trial_end: &'a str,
+    pub billing_url: Option<&'a str>,
+}
+
+#[derive(Template)]
+#[template(path = "emails/trial_ending_soon.html")]
+pub struct TrialEndingSoonHtml<'a> {
+    pub plan_name: &'a str,
+    pub trial_end: &'a str,
+    pub billing_url: Option<&'a str>,
+}
+
+#[derive(Template)]
+#[template(path = "emails/past_due_reminder.txt")]
+pub struct PastDueReminderPlain<'a> {
+    pub hosted_invoice_url: Option<&'a str>,
+    pub billing_url: Option<&'a str>,
+}
+
+#[derive(Template)]
+#[template(path = "emails/past_due_reminder.html")]
+pub struct PastDueReminderHtml<'a> {
+    pub hosted_invoice_url: Option<&'a str>,
+    pub billing_url: Option<&'a str>,
+}

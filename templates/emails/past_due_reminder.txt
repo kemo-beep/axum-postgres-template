@@ -1,0 +1,11 @@
+Your subscription payment is past due.
+
+Please update your payment method to avoid service interruption.
+{% if let Some(url) = hosted_invoice_url %}
+
+View your invoice: {{ url }}
+{% endif %}
+{% if let Some(url) = billing_url %}
+
+Update payment method: {{ url }}
+{% endif %}

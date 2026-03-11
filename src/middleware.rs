@@ -1,9 +1,16 @@
 use std::time::Duration;
 
-use axum::http::{HeaderName, HeaderValue, StatusCode};
-use hyper::Request;
+use axum::{
+    extract::Request,
+    http::{HeaderName, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
+    Json,
+};
+use hyper::Method;
+use serde::Serialize;
 use tower_http::{
     cors::{AllowHeaders, AllowOrigin, Any, CorsLayer},
+    limit::RequestBodyLimitLayer,
     normalize_path::NormalizePathLayer,
     request_id::{MakeRequestId, PropagateRequestIdLayer, RequestId, SetRequestIdLayer},
     set_header::SetResponseHeaderLayer,
@@ -97,4 +104,79 @@ pub fn timeout_layer() -> TimeoutLayer {
 /// will be changed to `/foo` before reaching the inner service.
 pub fn normalize_path_layer() -> NormalizePathLayer {
     NormalizePathLayer::trim_trailing_slash()
+}
+
+/// Request body size limit in bytes (1 MiB). Applied to all JSON/body-consuming routes.
+pub const REQUEST_BODY_LIMIT: usize = 1 << 20;
+
+/// Layer that limits request body size. Returns 413 Payload Too Large when exceeded.
+pub fn request_body_limit_layer() -> RequestBodyLimitLayer {
+    RequestBodyLimitLayer::new(REQUEST_BODY_LIMIT)
+}
+
+/// Idempotency-Key header name.
+pub const IDEMPOTENCY_KEY: HeaderName = HeaderName::from_static("idempotency-key");
+
+/// Require Idempotency-Key header on mutable methods (POST, PUT, PATCH, DELETE).
+/// Returns 400 if missing or invalid (must be valid UUID).
+pub async fn require_idempotency_key(request: Request, next: axum::middleware::Next) -> Response {
+    let method = request.method().clone();
+    if !method.is_mutable() {
+        return next.run(request).await;
+    }
+    let key = request
+        .headers()
+        .get(&IDEMPOTENCY_KEY)
+        .and_then(|v| v.to_str().ok());
+    let Some(key) = key else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(IdempotencyError {
+                message: "Missing Idempotency-Key header (required for POST, PUT, PATCH, DELETE)".into(),
+            }),
+        )
+            .into_response();
+    };
+    if uuid::Uuid::parse_str(key.trim()).is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(IdempotencyError {
+                message: "Idempotency-Key must be a valid UUID".into(),
+            }),
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
+#[derive(Serialize)]
+struct IdempotencyError {
+    message: String,
+}
+
+trait MethodExt {
+    fn is_mutable(&self) -> bool;
+}
+impl MethodExt for Method {
+    fn is_mutable(&self) -> bool {
+        self == Method::POST || self == Method::PUT || self == Method::PATCH || self == Method::DELETE
+    }
+}
+
+/// Layer that adds `Deprecation: true` header. Use for endpoints being retired.
+/// For Sunset date, add `.layer(SetResponseHeaderLayer::overriding(...))` with `sunset` header.
+pub fn deprecation_layer() -> SetResponseHeaderLayer<HeaderValue> {
+    SetResponseHeaderLayer::overriding(
+        HeaderName::from_static("deprecation"),
+        HeaderValue::from_static("true"),
+    )
+}
+
+/// Layer that adds `Sunset` header (RFC 8594). Use with deprecation_layer for retiring endpoints.
+/// Format: `Sat, 01 Jan 2027 00:00:00 GMT`
+pub fn sunset_layer(sunset_date: &'static str) -> SetResponseHeaderLayer<HeaderValue> {
+    SetResponseHeaderLayer::overriding(
+        HeaderName::from_static("sunset"),
+        HeaderValue::try_from(sunset_date).unwrap_or(HeaderValue::from_static("")),
+    )
 }

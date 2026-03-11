@@ -41,6 +41,181 @@
         }
       }
     },
+    "/internal/feature-flags": {
+      "get": {
+        "tags": [
+          "Internal"
+        ],
+        "summary": "List all feature flags (global and per-org). Admin only.",
+        "operationId": "list_all",
+        "responses": {
+          "200": {
+            "description": "All feature flags",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/FeatureFlagItem"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "500": {
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/internal/feature-flags/{name}": {
+      "put": {
+        "tags": [
+          "Internal"
+        ],
+        "summary": "Set a global or per-org feature flag. Admin only.",
+        "operationId": "set_flag",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Flag name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "org_id",
+            "in": "query",
+            "description": "Org UUID for per-org override",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetFlagRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Flag updated",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "500": {
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/internal/impersonate": {
+      "post": {
+        "tags": [
+          "Internal"
+        ],
+        "summary": "Create a short-lived impersonation token to act as the target user.\nRequires admin:impersonate. Audit-logged.",
+        "operationId": "impersonate",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImpersonateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Impersonation token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImpersonateResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "User not found"
+          },
+          "500": {
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/internal/job-stats": {
+      "get": {
+        "tags": [
+          "Internal"
+        ],
+        "summary": "Returns job queue stats (enqueue, success, fail, dead-letter counts, latency).\nIntended for internal monitoring; consider restricting to loopback in production.",
+        "operationId": "job_stats",
+        "responses": {
+          "200": {
+            "description": "Job queue stats",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobStatsResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/v1/auth/api-keys": {
       "get": {
         "tags": [
@@ -528,6 +703,128 @@
         ]
       }
     },
+    "/v1/auth/me/delete": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Soft-delete current user. Requires auth. Account can be restored within retention (e.g. 30 days) via restore endpoint.",
+        "operationId": "me_delete",
+        "responses": {
+          "200": {
+            "description": "Account soft-deleted",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResp"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/v1/auth/me/delete-permanent": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Permanently delete account (GDPR erasure). Requires confirmation. Irreversible.",
+        "operationId": "me_delete_permanent",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeletePermanentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Account permanently deleted",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Confirmation required or invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResp"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResp"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/v1/auth/me/export": {
+      "get": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Export all user data (GDPR right to portability).",
+        "operationId": "me_export",
+        "responses": {
+          "200": {
+            "description": "User data export",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResp"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/v1/auth/password-reset/confirm": {
       "post": {
         "tags": [
@@ -733,6 +1030,86 @@
         }
       }
     },
+    "/v1/auth/restore": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Restore soft-deleted account with email + code. Returns new access token.",
+        "operationId": "restore",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreConfirmRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Restored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid code or expired retention",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResp"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/restore-request": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Request restore code for soft-deleted account. Sends code to email if within retention.",
+        "operationId": "restore_request",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Code sent if account eligible for restore",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResp"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/auth/send-code": {
       "post": {
         "tags": [
@@ -851,81 +1228,6 @@
             }
           }
         }
-      }
-    },
-    "/v1/billing/checkout": {
-      "post": {
-        "tags": [
-          "Billing"
-        ],
-        "operationId": "checkout",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CheckoutRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Checkout URL",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/UrlResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiErrorResp"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiErrorResp"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiErrorResp"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Billing not configured",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiErrorResp"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
       }
     },
     "/v1/billing/packages": {
@@ -1050,28 +1352,18 @@
         ]
       }
     },
-    "/v1/billing/transactions": {
+    "/v1/billing/subscription-status": {
       "get": {
         "tags": [
           "Billing"
         ],
-        "operationId": "transactions",
+        "operationId": "subscription_status",
         "responses": {
           "200": {
-            "description": "Subscription and credit transactions"
+            "description": "User's subscription plan name, if subscribed"
           },
           "401": {
             "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiErrorResp"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden",
             "content": {
               "application/json": {
                 "schema": {
@@ -1475,6 +1767,132 @@
         ]
       }
     },
+    "/v1/orgs/{org_id}/billing/checkout": {
+      "post": {
+        "tags": [
+          "Billing"
+        ],
+        "operationId": "checkout",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckoutRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Checkout URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UrlResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResp"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResp"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResp"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Billing not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResp"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/v1/orgs/{org_id}/billing/subscription": {
+      "get": {
+        "tags": [
+          "Billing"
+        ],
+        "operationId": "get_subscription",
+        "responses": {
+          "200": {
+            "description": "Org subscription with plan"
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResp"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResp"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No active subscription"
+          },
+          "500": {
+            "description": "Billing not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResp"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/v1/orgs/{org_id}/billing/subscription/cancel": {
       "post": {
         "tags": [
@@ -1643,6 +2061,103 @@
                 }
               }
             }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/v1/orgs/{org_id}/billing/transactions": {
+      "get": {
+        "tags": [
+          "Billing"
+        ],
+        "operationId": "transactions",
+        "responses": {
+          "200": {
+            "description": "Subscription and credit transactions"
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResp"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResp"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Billing not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResp"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/v1/orgs/{org_id}/feature-flags": {
+      "get": {
+        "tags": [
+          "Feature Flags"
+        ],
+        "summary": "List effective feature flags for an org (global + org overrides). Org member only.",
+        "operationId": "list_for_org",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Org UUID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Effective flags for org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/FeatureFlagEffectiveItem"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "500": {
+            "description": "Internal error"
           }
         },
         "security": [
@@ -2764,6 +3279,53 @@
           }
         }
       },
+      "DeletePermanentRequest": {
+        "type": "object",
+        "required": [
+          "confirm"
+        ],
+        "properties": {
+          "confirm": {
+            "type": "string"
+          }
+        }
+      },
+      "FeatureFlagEffectiveItem": {
+        "type": "object",
+        "required": [
+          "name",
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "FeatureFlagItem": {
+        "type": "object",
+        "required": [
+          "name",
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "org_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "HealthResponse": {
         "type": "object",
         "required": [
@@ -2771,6 +3333,34 @@
         ],
         "properties": {
           "status": {
+            "type": "string"
+          }
+        }
+      },
+      "ImpersonateRequest": {
+        "type": "object",
+        "required": [
+          "user_id"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string"
+          }
+        }
+      },
+      "ImpersonateResponse": {
+        "type": "object",
+        "required": [
+          "token",
+          "expires_in_secs"
+        ],
+        "properties": {
+          "expires_in_secs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "token": {
             "type": "string"
           }
         }
@@ -2783,6 +3373,51 @@
         "properties": {
           "token": {
             "type": "string"
+          }
+        }
+      },
+      "JobStatsResponse": {
+        "type": "object",
+        "required": [
+          "enqueue",
+          "success",
+          "fail",
+          "dead_letter",
+          "latency_sample_count"
+        ],
+        "properties": {
+          "dead_letter": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "enqueue": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "fail": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "last_latency_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "latency_sample_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "success": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
           }
         }
       },
@@ -2902,6 +3537,32 @@
           }
         }
       },
+      "RestoreConfirmRequest": {
+        "type": "object",
+        "required": [
+          "email",
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          }
+        }
+      },
+      "RestoreRequest": {
+        "type": "object",
+        "required": [
+          "email"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          }
+        }
+      },
       "RoleResponse": {
         "type": "object",
         "required": [
@@ -2925,6 +3586,17 @@
         "properties": {
           "email": {
             "type": "string"
+          }
+        }
+      },
+      "SetFlagRequest": {
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
           }
         }
       },

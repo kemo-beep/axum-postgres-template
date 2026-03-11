@@ -144,11 +144,31 @@ impl FromRequestParts<AppState> for RequireAuth {
                     "Auth service not configured"
                 )))?;
 
-        let user_id = auth_service.verify_token(&token).await?;
+        let token_info = auth_service.verify_token(&token).await?;
         let user = auth_service
-            .get_user(user_id)
+            .get_user(token_info.user_id)
             .await?
             .ok_or(ApiError::Unauthorized)?;
+
+        if let Some(actor_id) = token_info.impersonated_by {
+            let method = parts.method.as_str().to_string();
+            let path = parts.uri.path().to_string();
+            let ip = parts
+                .headers
+                .get("x-forwarded-for")
+                .or_else(|| parts.headers.get("x-real-ip"))
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.split(',').next())
+                .map(String::from);
+            crate::auth::audit::log_impersonation_request_async(
+                state.db.pool.clone(),
+                actor_id,
+                token_info.user_id,
+                method,
+                path,
+                ip,
+            );
+        }
 
         Ok(RequireAuth(user))
     }
@@ -220,11 +240,30 @@ pub(crate) async fn auth_and_check_permission(
             .ok_or(ApiError::InternalError(anyhow::anyhow!(
                 "Auth service not configured"
             )))?;
-    let user_id = auth_service.verify_token(&token).await?;
+    let token_info = auth_service.verify_token(&token).await?;
     let user = auth_service
-        .get_user(user_id)
+        .get_user(token_info.user_id)
         .await?
         .ok_or(ApiError::Unauthorized)?;
+    if let Some(actor_id) = token_info.impersonated_by {
+        let method = parts.method.as_str().to_string();
+        let path = parts.uri.path().to_string();
+        let ip = parts
+            .headers
+            .get("x-forwarded-for")
+            .or_else(|| parts.headers.get("x-real-ip"))
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(',').next())
+            .map(String::from);
+        crate::auth::audit::log_impersonation_request_async(
+            state.db.pool.clone(),
+            actor_id,
+            token_info.user_id,
+            method,
+            path,
+            ip,
+        );
+    }
     check_permission(state, user.id, permission).await?;
     parts.extensions.insert(AuthenticatedUser(user.clone()));
     Ok(user)
@@ -256,6 +295,8 @@ define_permission_extractor!(RequireUsersWrite, permissions::USERS_WRITE);
 define_permission_extractor!(RequireBillingManage, permissions::BILLING_MANAGE);
 define_permission_extractor!(RequireFilesRead, permissions::FILES_READ);
 define_permission_extractor!(RequireFilesWrite, permissions::FILES_WRITE);
+define_permission_extractor!(RequireAdmin, permissions::ADMIN_ACCESS);
+define_permission_extractor!(RequireAdminImpersonate, permissions::ADMIN_IMPERSONATE);
 
 /// Extractor that requires auth and org membership. Use on routes with path param `:org_id`.
 /// Yields (User, OrgId).

@@ -47,9 +47,11 @@ impl OrgService {
     pub async fn get_user_orgs(
         &self,
         user_id: UserId,
+        limit: i64,
+        offset: i64,
     ) -> Result<Vec<crate::org::repository::Org>, ApiError> {
         self.repo
-            .get_user_orgs(user_id)
+            .get_user_orgs(user_id, limit, offset)
             .await
             .map_err(ApiError::InternalError)
     }
@@ -89,10 +91,12 @@ impl OrgService {
         &self,
         org_id: OrgId,
         user_id: UserId,
+        limit: i64,
+        offset: i64,
     ) -> Result<Vec<crate::org::repository::Workspace>, ApiError> {
         self.repo.ensure_user_in_org(user_id, org_id).await?;
         self.repo
-            .list_workspaces(org_id)
+            .list_workspaces(org_id, limit, offset)
             .await
             .map_err(ApiError::InternalError)
     }
@@ -101,10 +105,12 @@ impl OrgService {
         &self,
         org_id: OrgId,
         user_id: UserId,
+        limit: i64,
+        offset: i64,
     ) -> Result<Vec<OrgMember>, ApiError> {
         self.repo.ensure_user_in_org(user_id, org_id).await?;
         self.repo
-            .get_org_members(org_id)
+            .get_org_members(org_id, limit, offset)
             .await
             .map_err(ApiError::InternalError)
     }

@@ -24,6 +24,12 @@ pub const ORGS_MANAGE: &str = "orgs:manage";
 /// Permission: create workspaces, manage workspace settings.
 pub const WORKSPACES_MANAGE: &str = "workspaces:manage";
 
+/// Permission: access internal/admin routes (job-stats, feature flags, etc.).
+pub const ADMIN_ACCESS: &str = "admin:access";
+
+/// Permission: impersonate users for support (audit-logged).
+pub const ADMIN_IMPERSONATE: &str = "admin:impersonate";
+
 /// Checks that a permission string follows the `resource:action` convention.
 /// Returns true if the string contains exactly one `:` and both parts are non-empty.
 pub fn is_valid_permission(name: &str) -> bool {

@@ -43,7 +43,7 @@ Production-ready backend checklist for an Axum + PostgreSQL SaaS stack.
 
 - [x] Stateless handlers (session/tenant in extractors or state)
 - [x] Avoid N+1 queries; batch or join where needed
-- [ ] External calls (email, Stripe, R2) non-blocking and with timeouts
+- [x] External calls (email, Stripe, R2) non-blocking and with timeouts
 
 ---
 
@@ -216,7 +216,8 @@ Three login methods: **email code**, **Google**, and **email + password**.
 - [x] Verify signature (Stripe: `Stripe-Signature`, constant-time HMAC)
 - [x] Idempotency: subscription creation checks existence before insert; retries safe
 - [x] Return 200 quickly, process async (`tokio::spawn` after verify)
-- [ ] Log failures for debugging; retry policy per provider docs
+- [x] Log failures for debugging
+- [ ] Retry policy per provider docs
 
 ### Checkout & customer portal
 
@@ -226,9 +227,9 @@ Three login methods: **email code**, **Google**, and **email + password**.
 
 ### Edge cases
 
-- [ ] Handle `invoice.payment_failed` (notify user, retry logic)
-- [ ] Proration on plan changes
-- [ ] Refunds and their impact on token balance (if applicable)
+- [x] Handle `invoice.payment_failed` (notify user, retry logic)
+- [x] Proration on plan changes
+- [x] Refunds and their impact on token balance (if applicable)
 
 ---
 
@@ -236,7 +237,7 @@ Three login methods: **email code**, **Google**, and **email + password**.
 
 - [x] Consistent error types (`thiserror`, `ApiError`)
 - [x] HTTP status codes mapped to errors (400, 401, 403, 404, 409, 422, 429, 500)
-- [ ] Validation (e.g. `validator`, `axum-valid`); basic validation in services
+- [x] Validation (e.g. `validator`, `axum-valid`); basic validation in services
 - [x] OpenAPI / Swagger (`utoipa` with all routes)
 
 ---
@@ -259,9 +260,9 @@ Three login methods: **email code**, **Google**, and **email + password**.
 - [x] Job queue trait (`services::JobQueue`); template uses `tokio::spawn`. Document Redis/`background-jobs` as production upgrade.
 - [x] Async email sending via `EmailSender` trait (spawn or queue)
 - [x] Webhook handling: return 200 fast, process in background (`tokio::spawn`)
-- [ ] Scheduled jobs: subscription checks, cleanup, reminder emails
-- [ ] Retries with backoff and dead-letter handling
-- [ ] Job observability (enqueue/fail counts, latency)
+- [x] Scheduled jobs: subscription checks, cleanup, reminder emails
+- [x] Retries with backoff and dead-letter handling
+- [x] Job observability (enqueue/fail counts, latency)
 
 ---
 
@@ -270,38 +271,38 @@ Three login methods: **email code**, **Google**, and **email + password**.
 - [x] Handle SIGTERM / SIGINT (`tokio::signal::ctrl_c`)
 - [x] Stop accepting new connections
 - [x] Drain in-flight requests (axum graceful shutdown)
-- [ ] Close DB pool and other resources
-- [ ] Exit cleanly
+- [x] Close DB pool and other resources
+- [x] Exit cleanly
 
 ---
 
 ## API Design & Versioning
 
 - [x] API versioning (`/v1/` for auth, files, etc.)
-- [ ] Idempotency keys for mutable endpoints (`Idempotency-Key` header)
-- [ ] Request/response size limits
-- [ ] Pagination for list endpoints (cursor or offset)
-- [ ] Deprecation headers / sunset policy
+- [x] Idempotency keys for mutable endpoints (`Idempotency-Key` header)
+- [x] Request/response size limits
+- [x] Pagination for list endpoints (cursor or offset)
+- [x] Deprecation headers / sunset policy
 
 ---
 
 ## Data & Compliance
 
-- [ ] Soft delete for audit trail and recovery
-- [ ] Account deletion flow (GDPR right to erasure)
-- [ ] Data export (GDPR right to portability)
-- [ ] Data retention policy (logs, audit, backups)
-- [ ] PII handling: minimize storage, encrypt if needed
+- [x] Soft delete for audit trail and recovery
+- [x] Account deletion flow (GDPR right to erasure)
+- [x] Data export (GDPR right to portability)
+- [x] Data retention policy (logs, audit, backups)
+- [x] PII handling: minimize storage, encrypt if needed
 
 ---
 
 ## Resilience
 
 - [x] DB connection retry with backoff on startup
-- [ ] Timeouts on external calls (Stripe, SMTP, R2)
+- [x] Timeouts on external calls (Stripe, SMTP, R2)
 - [ ] Circuit breaker for external services (optional)
 - [x] Request timeout (tower-http)
-- [ ] DB backup strategy and restore procedure
+- [x] DB backup strategy and restore procedure
 
 ---
 
@@ -317,16 +318,16 @@ Three login methods: **email code**, **Google**, and **email + password**.
 
 ## Admin & Operations
 
-- [ ] Admin API or internal routes (auth-protected)
-- [ ] Impersonation for support (audit-logged)
-- [ ] Feature flags (per-tenant or global)
-- [ ] Runbook / ops documentation
+- [x] Admin API or internal routes (auth-protected)
+- [x] Impersonation for support (audit-logged)
+- [x] Feature flags (per-tenant or global)
+- [x] Runbook / ops documentation
 
 ---
 
 ## Deployment
 
-- [ ] Dockerfile / container image
+- [x] Dockerfile / container image
 - [x] Migrations in startup (`sqlx::migrate!` in main)
 - [ ] Health checks in container orchestration
 - [ ] Secrets from env / secret manager (e.g. Doppler, Vault)
