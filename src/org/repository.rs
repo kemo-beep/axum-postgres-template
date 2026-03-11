@@ -246,6 +246,17 @@ impl OrgRepository {
         Ok(row)
     }
 
+    pub async fn count_members_with_role(&self, org_id: OrgId, role: &str) -> Result<i64> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM org_members WHERE org_id = $1 AND role = $2",
+        )
+        .bind(org_id.0)
+        .bind(role)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count)
+    }
+
     /// Ensures the user is a member of the org. Returns Ok(()) if yes, ApiError::NotFound otherwise.
     pub async fn ensure_user_in_org(&self, user_id: UserId, org_id: OrgId) -> Result<(), ApiError> {
         let exists = sqlx::query_scalar::<_, bool>(

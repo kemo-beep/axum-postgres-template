@@ -206,6 +206,7 @@ pub async fn verify_code(
             "Auth not configured"
         )))?;
     let user = auth.verify_code(&req.email, &req.code).await?;
+    state.org_service.ensure_default_org(user.id).await?;
     let access_token = auth.create_access_token(user.id)?;
     let cookie = build_auth_cookie(&access_token, &state.cfg);
     Ok((
@@ -245,6 +246,7 @@ pub async fn register(
             "Auth not configured"
         )))?;
     let user = auth.register(&req.email, &req.password).await?;
+    state.org_service.ensure_default_org(user.id).await?;
     let access_token = auth.create_access_token(user.id)?;
     let cookie = build_auth_cookie(&access_token, &state.cfg);
     Ok((
@@ -372,6 +374,7 @@ pub async fn google_callback(
         state.cfg.base_url.trim_end_matches('/')
     );
     let user = auth.login_google(&query.code, &redirect_uri).await?;
+    state.org_service.ensure_default_org(user.id).await?;
     let access_token = auth.create_access_token(user.id)?;
 
     if let Some(ref frontend_url) = state.cfg.frontend_url {

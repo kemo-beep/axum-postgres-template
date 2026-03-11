@@ -2,7 +2,7 @@
 
 use axum::{
     extract::{Path, Query, State},
-    routing::{get, post},
+    routing::{get, patch, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,7 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::auth::extractor::RequireAuth;
-use crate::common::{ApiError, OrgId, PaginationQuery};
+use crate::common::{ApiError, OrgId, PaginationQuery, UserId};
 use crate::org::repository::{Org, Workspace};
 use crate::AppState;
 
@@ -68,6 +68,13 @@ pub struct AcceptInviteRequest {
 #[derive(Serialize, ToSchema)]
 pub struct OrgMemberResponse {
     pub user_id: String,
+    pub email: Option<String>,
+    pub role: String,
+}
+
+#[derive(Deserialize, ToSchema, Validate)]
+pub struct UpdateMemberRoleRequest {
+    #[validate(length(min = 1, max = 50))]
     pub role: String,
 }
 
@@ -167,7 +174,7 @@ pub async fn get_org(
     Ok(Json(org_to_response(&org)))
 }
 
-/// List members of an org.
+/// List members of an org (with email for display).
 #[utoipa::path(
     get,
     path = "/v1/orgs/{org_id}/members",
@@ -193,17 +200,83 @@ pub async fn list_members(
     let offset = pagination.offset() as i64;
     let members = state
         .org_service
-        .list_members(org_id, user.id, limit, offset)
+        .list_members_with_email(org_id, user.id, limit, offset)
         .await?;
     Ok(Json(
         members
             .iter()
             .map(|m| OrgMemberResponse {
                 user_id: m.user_id.0.to_string(),
+                email: Some(m.email.clone()),
                 role: m.role.clone(),
             })
             .collect(),
     ))
+}
+
+/// Update a member's role. Requires admin or owner.
+#[utoipa::path(
+    patch,
+    path = "/v1/orgs/{org_id}/members/{user_id}",
+    tag = "Orgs",
+    params(("org_id" = String, Path), ("user_id" = String, Path)),
+    security(("bearer_auth" = [])),
+    request_body = UpdateMemberRoleRequest,
+    responses(
+        (status = 200, description = "Member updated"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Not found"),
+        (status = 500, description = "Internal error")
+    )
+)]
+pub async fn update_member(
+    State(state): State<AppState>,
+    RequireAuth(user): RequireAuth,
+    Path((org_id, user_id)): Path<(String, String)>,
+    Json(req): Json<UpdateMemberRoleRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    req.validate().map_err(|e| ApiError::UnprocessableEntity(e.to_string()))?;
+    let org_id = Uuid::parse_str(&org_id).map_err(|_| ApiError::NotFound)?;
+    let org_id = OrgId::from_uuid(org_id);
+    let target_uuid = Uuid::parse_str(&user_id).map_err(|_| ApiError::NotFound)?;
+    let target_user_id = UserId(target_uuid);
+    state
+        .org_service
+        .update_member_role(org_id, user.id, target_user_id, &req.role)
+        .await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Remove a member from the org. Requires admin or owner.
+#[utoipa::path(
+    delete,
+    path = "/v1/orgs/{org_id}/members/{user_id}",
+    tag = "Orgs",
+    params(("org_id" = String, Path), ("user_id" = String, Path)),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Member removed"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Not found"),
+        (status = 500, description = "Internal error")
+    )
+)]
+pub async fn remove_member(
+    State(state): State<AppState>,
+    RequireAuth(user): RequireAuth,
+    Path((org_id, user_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let org_id = Uuid::parse_str(&org_id).map_err(|_| ApiError::NotFound)?;
+    let org_id = OrgId::from_uuid(org_id);
+    let target_uuid = Uuid::parse_str(&user_id).map_err(|_| ApiError::NotFound)?;
+    let target_user_id = UserId(target_uuid);
+    state
+        .org_service
+        .remove_member(org_id, user.id, target_user_id)
+        .await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 /// Create an invite for an org.
@@ -331,6 +404,10 @@ pub fn router() -> Router<AppState> {
         .route("/", get(list_orgs).post(create_org))
         .route("/{org_id}", get(get_org))
         .route("/{org_id}/members", get(list_members))
+        .route(
+            "/{org_id}/members/{user_id}",
+            patch(update_member).delete(remove_member),
+        )
         .route("/{org_id}/invites", post(create_invite))
         .route(
             "/{org_id}/workspaces",
