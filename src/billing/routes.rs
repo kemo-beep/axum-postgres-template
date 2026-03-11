@@ -16,7 +16,7 @@ use validator::Validate;
 
 use axum::middleware::from_extractor_with_state;
 
-use crate::auth::extractor::{RequireAuth, RequireBillingManage, RequireOrgBillingAccess};
+use crate::auth::extractor::{RequireAuth, RequireOrgBillingAccess};
 use crate::common::ApiError;
 use crate::AppState;
 
@@ -494,18 +494,13 @@ pub async fn subscription_change_plan(
 }
 
 pub fn billing_router(state: &AppState) -> Router<AppState> {
-    let protected = Router::new()
-        .route("/portal", get(portal))
-        .route_layer(from_extractor_with_state::<RequireBillingManage, _>(
-            state.clone(),
-        ));
     let auth_only = Router::new()
+        .route("/portal", get(portal))
         .route("/subscription-status", get(subscription_status))
         .route_layer(from_extractor_with_state::<RequireAuth, _>(state.clone()));
     Router::new()
         .route("/plans", get(list_plans))
         .route("/packages", get(list_packages))
-        .merge(protected)
         .merge(auth_only)
 }
 
