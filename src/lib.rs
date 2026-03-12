@@ -2,6 +2,7 @@ use axum::Router;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
+pub mod ai;
 pub mod auth;
 pub mod billing;
 pub mod cfg;
@@ -83,6 +84,7 @@ pub use db::*;
         feature_flags::routes::set_flag,
         routes::job_stats::job_stats,
         routes::impersonate::impersonate,
+        routes::admin_users::list_users,
     ),
     components(
         schemas(
@@ -127,6 +129,8 @@ pub use db::*;
             routes::contact::ContactRequest,
             routes::contact::ContactResponse,
             routes::job_stats::JobStatsResponse,
+            routes::admin_users::AdminUserItem,
+            routes::admin_users::ListUsersResponse,
         )
     ),
     modifiers(&SecurityAddon)
@@ -190,6 +194,7 @@ pub struct AppState {
     pub feature_flag_service: FeatureFlagService,
     pub job_queue: Arc<ObservantJobQueue>,
     pub realtime_hub: Option<realtime::BroadcastHub>,
+    pub ai_service: crate::ai::service::AiService,
 }
 
 pub fn router(cfg: Config, db: Db, storage_service: Option<StorageService>) -> Router {
@@ -278,6 +283,8 @@ pub fn router(cfg: Config, db: Db, storage_service: Option<StorageService>) -> R
 
     let realtime_hub = Some(realtime::BroadcastHub::new());
 
+    let ai_service = crate::ai::service::AiService::new();
+
     let app_state = AppState {
         db,
         cfg,
@@ -291,6 +298,7 @@ pub fn router(cfg: Config, db: Db, storage_service: Option<StorageService>) -> R
         feature_flag_service,
         job_queue,
         realtime_hub,
+        ai_service,
     };
 
     // Scheduled background jobs: reconciliation, cleanup, reminder emails.
@@ -321,14 +329,17 @@ pub fn router(cfg: Config, db: Db, storage_service: Option<StorageService>) -> R
     // Security headers: X-Content-Type-Options, X-Frame-Options, HSTS (production only).
     let is_production = matches!(app_state.cfg.env, cfg::Environment::Production);
 
-    // Create the router with the routes. WebSocket route must not get the 15s timeout.
+    // Create the router with the routes. WebSocket and AI streaming must not get the 15s timeout.
     let main_router = routes::router(&app_state);
     let ws_router = Router::new()
         .nest("/v1", realtime::routes::router(&app_state));
+    let streaming_router = Router::new()
+        .nest("/v1", Router::new().nest("/ai", crate::ai::routes::router(&app_state)));
 
-    // Merge ws first (no timeout), then main router with timeout.
+    // Merge ws, then AI (no timeout), then main router with timeout.
     let router = Router::new()
         .merge(ws_router)
+        .merge(streaming_router)
         .merge(main_router.layer(timeout_layer));
 
     // Combine all the routes and apply the middleware layers.

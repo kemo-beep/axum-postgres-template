@@ -270,6 +270,36 @@ impl UserRepository {
                 .await?;
         Ok(row.flatten())
     }
+
+    /// List users for admin (id, email, created_at). Excludes soft-deleted. Paginated.
+    pub async fn list_all(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<(UserId, String, DateTime<Utc>)>, i64)> {
+        let rows = sqlx::query(
+            "SELECT id, email, created_at FROM users WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+        let users = rows
+            .into_iter()
+            .map(|r: sqlx::postgres::PgRow| {
+                (
+                    UserId(r.get("id")),
+                    r.get("email"),
+                    r.get("created_at"),
+                )
+            })
+            .collect();
+
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE deleted_at IS NULL")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok((users, total))
+    }
 }
 
 /// Database access for `email_login_codes` (magic link / login codes).

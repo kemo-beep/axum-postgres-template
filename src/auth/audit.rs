@@ -108,3 +108,85 @@ pub fn log_impersonation_request_async(
         }
     });
 }
+
+/// Spawn a non-blocking audit log for user login.
+pub fn log_login_async(pool: PgPool, user_id: UserId, method: &str, ip: Option<String>) {
+    let method = method.to_string();
+    tokio::spawn(async move {
+        let repo = AuditRepository::new(pool);
+        let metadata = serde_json::json!({ "method": method });
+        if let Err(e) = repo
+            .log(user_id, "user_login", None, None, Some(metadata), ip.as_deref(), None)
+            .await
+        {
+            tracing::warn!("Audit log (login) failed: {}", e);
+        }
+    });
+}
+
+/// Spawn a non-blocking audit log for user registration.
+pub fn log_register_async(pool: PgPool, user_id: UserId, method: &str, ip: Option<String>) {
+    let method = method.to_string();
+    tokio::spawn(async move {
+        let repo = AuditRepository::new(pool);
+        let metadata = serde_json::json!({ "method": method });
+        if let Err(e) = repo
+            .log(user_id, "user_register", None, None, Some(metadata), ip.as_deref(), None)
+            .await
+        {
+            tracing::warn!("Audit log (register) failed: {}", e);
+        }
+    });
+}
+
+/// Spawn a non-blocking audit log for org member role changes.
+pub fn log_role_change_async(
+    pool: PgPool,
+    actor_id: UserId,
+    target_user_id: UserId,
+    org_id: OrgId,
+    new_role: &str,
+    action: &str,
+) {
+    let new_role = new_role.to_string();
+    let action = action.to_string();
+    tokio::spawn(async move {
+        let repo = AuditRepository::new(pool);
+        let metadata = serde_json::json!({ "new_role": new_role });
+        if let Err(e) = repo
+            .log(
+                actor_id,
+                &action,
+                Some(target_user_id),
+                Some(org_id),
+                Some(metadata),
+                None,
+                None,
+            )
+            .await
+        {
+            tracing::warn!("Audit log (role change) failed: {}", e);
+        }
+    });
+}
+
+/// Spawn a non-blocking audit log for billing actions (checkout, cancel, plan change).
+pub fn log_billing_action_async(
+    pool: PgPool,
+    user_id: UserId,
+    org_id: OrgId,
+    action: &str,
+    metadata: Option<serde_json::Value>,
+) {
+    let action = action.to_string();
+    tokio::spawn(async move {
+        let repo = AuditRepository::new(pool);
+        if let Err(e) = repo
+            .log(user_id, &action, None, Some(org_id), metadata, None, None)
+            .await
+        {
+            tracing::warn!("Audit log (billing) failed: {}", e);
+        }
+    });
+}
+

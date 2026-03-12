@@ -209,6 +209,7 @@ pub async fn verify_code(
     let user = auth.verify_code(&req.email, &req.code).await?;
     state.org_service.ensure_default_org(user.id).await?;
     let access_token = auth.create_access_token(user.id)?;
+    crate::auth::audit::log_login_async(state.db.pool.clone(), user.id, "email_code", None);
     let cookie = build_auth_cookie(&access_token, &state.cfg);
     Ok((
         jar.add(cookie),
@@ -249,6 +250,7 @@ pub async fn register(
     let user = auth.register(&req.email, &req.password).await?;
     state.org_service.ensure_default_org(user.id).await?;
     let access_token = auth.create_access_token(user.id)?;
+    crate::auth::audit::log_register_async(state.db.pool.clone(), user.id, "email_password", None);
     let cookie = build_auth_cookie(&access_token, &state.cfg);
     Ok((
         jar.add(cookie),
@@ -290,6 +292,7 @@ pub async fn login(
         )))?;
     let user = auth.login_password(&req.email, &req.password).await?;
     let access_token = auth.create_access_token(user.id)?;
+    crate::auth::audit::log_login_async(state.db.pool.clone(), user.id, "password", None);
     let cookie = build_auth_cookie(&access_token, &state.cfg);
     Ok((
         jar.add(cookie),
@@ -377,6 +380,7 @@ pub async fn google_callback(
     let user = auth.login_google(&query.code, &redirect_uri).await?;
     state.org_service.ensure_default_org(user.id).await?;
     let access_token = auth.create_access_token(user.id)?;
+    crate::auth::audit::log_login_async(state.db.pool.clone(), user.id, "google_oauth", None);
 
     if let Some(ref frontend_url) = state.cfg.frontend_url {
         let base = frontend_url.trim_end_matches('/');

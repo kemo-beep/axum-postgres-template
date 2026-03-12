@@ -1,5 +1,6 @@
 use axum::{middleware, routing::get, routing::post, routing::put, Router};
 
+pub mod admin_users;
 pub mod contact;
 pub mod health_check;
 pub mod impersonate;
@@ -13,6 +14,7 @@ use crate::AppState;
 fn internal_routes(state: &AppState) -> Router<AppState> {
     Router::new()
         .route("/job-stats", get(job_stats::job_stats))
+        .route("/users", get(admin_users::list_users))
         .route("/impersonate", post(impersonate::impersonate))
         .route("/feature-flags", get(crate::feature_flags::routes::list_all))
         .route("/feature-flags/{name}", put(crate::feature_flags::routes::set_flag))

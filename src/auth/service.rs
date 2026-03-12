@@ -454,6 +454,18 @@ impl AuthService {
         .map_err(|e| ApiError::InternalError(e.into()))
     }
 
+    /// List users for admin (id, email, created_at). Paginated.
+    pub async fn list_users(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<(UserId, String, chrono::DateTime<Utc>)>, i64), ApiError> {
+        self.user_repo
+            .list_all(limit, offset)
+            .await
+            .map_err(ApiError::InternalError)
+    }
+
     pub async fn password_reset_request(&self, email: &str) -> Result<(), ApiError> {
         let email = email.trim().to_lowercase();
         if email.is_empty() || !email.contains('@') {
