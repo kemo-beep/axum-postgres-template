@@ -6,6 +6,7 @@ pub mod auth;
 pub mod billing;
 pub mod cfg;
 pub mod feature_flags;
+pub mod realtime;
 pub mod common;
 pub mod db;
 pub mod jobs;
@@ -52,6 +53,8 @@ pub use db::*;
         billing::routes::portal,
         billing::routes::subscription_status,
         billing::routes::get_subscription,
+        billing::routes::credits,
+        billing::routes::consume_credits,
         billing::routes::transactions,
         billing::routes::subscription_cancel,
         billing::routes::subscription_change_plan,
@@ -95,6 +98,8 @@ pub use db::*;
             billing::routes::CheckoutRequest,
             billing::routes::UrlResponse,
             billing::routes::ChangePlanRequest,
+            billing::routes::CreditsResponse,
+            billing::routes::ConsumeCreditsRequest,
             org::routes::CreateOrgRequest,
             org::routes::OrgResponse,
             org::routes::CreateWorkspaceRequest,
@@ -179,6 +184,7 @@ pub struct AppState {
     pub rbac_service: RbacService,
     pub feature_flag_service: FeatureFlagService,
     pub job_queue: Arc<ObservantJobQueue>,
+    pub realtime_hub: Option<realtime::BroadcastHub>,
 }
 
 pub fn router(cfg: Config, db: Db, storage_service: Option<StorageService>) -> Router {
@@ -271,6 +277,8 @@ pub fn router(cfg: Config, db: Db, storage_service: Option<StorageService>) -> R
         ApiKeyService::new(api_key_repo, user_repo, org_repo)
     });
 
+    let realtime_hub = Some(realtime::BroadcastHub::new());
+
     let app_state = AppState {
         db,
         cfg,
@@ -282,6 +290,7 @@ pub fn router(cfg: Config, db: Db, storage_service: Option<StorageService>) -> R
         rbac_service,
         feature_flag_service,
         job_queue,
+        realtime_hub,
     };
 
     // Scheduled background jobs: reconciliation, cleanup, reminder emails.
@@ -312,8 +321,15 @@ pub fn router(cfg: Config, db: Db, storage_service: Option<StorageService>) -> R
     // Security headers: X-Content-Type-Options, X-Frame-Options, HSTS (production only).
     let is_production = matches!(app_state.cfg.env, cfg::Environment::Production);
 
-    // Create the router with the routes.
-    let router = routes::router(&app_state);
+    // Create the router with the routes. WebSocket route must not get the 15s timeout.
+    let main_router = routes::router(&app_state);
+    let ws_router = Router::new()
+        .nest("/v1", realtime::routes::router(&app_state));
+
+    // Merge ws first (no timeout), then main router with timeout.
+    let router = Router::new()
+        .merge(ws_router)
+        .merge(main_router.layer(timeout_layer));
 
     // Combine all the routes and apply the middleware layers.
     // The order of the layers is important. The first layer is the outermost layer.
@@ -330,7 +346,6 @@ pub fn router(cfg: Config, db: Db, storage_service: Option<StorageService>) -> R
     app.layer(normalize_path_layer)
         .layer(cors_layer)
         .layer(middleware::request_body_limit_layer())
-        .layer(timeout_layer)
         .layer(propagate_request_id_layer)
         .layer(trace_layer)
         .layer(request_id_layer)

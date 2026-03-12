@@ -368,6 +368,85 @@ pub async fn get_subscription(
     }))
 }
 
+#[derive(Serialize, ToSchema)]
+pub struct CreditsResponse {
+    pub balance: i64,
+    /// Total tokens consumed (usage transactions).
+    pub consumed: i64,
+}
+
+#[derive(Deserialize, ToSchema, Validate)]
+pub struct ConsumeCreditsRequest {
+    #[validate(range(min = 1))]
+    pub amount: i64,
+    pub reason: Option<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/orgs/{org_id}/billing/credits",
+    tag = "Billing",
+    params(("org_id" = String, description = "Org UUID")),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Org credit balance", body = CreditsResponse),
+        (status = 401, description = "Unauthorized", body = crate::common::ApiErrorResp),
+        (status = 403, description = "Forbidden", body = crate::common::ApiErrorResp),
+        (status = 500, description = "Billing not configured", body = crate::common::ApiErrorResp)
+    )
+)]
+pub async fn credits(
+    State(state): State<AppState>,
+    RequireOrgBillingAccess(_user, org_id): RequireOrgBillingAccess,
+) -> Result<Json<CreditsResponse>, ApiError> {
+    let billing = state
+        .billing_service
+        .as_ref()
+        .ok_or(ApiError::InternalError(anyhow::anyhow!(
+            "Billing not configured"
+        )))?;
+
+    let (balance, consumed) = billing.get_org_credit_stats(org_id).await?;
+
+    Ok(Json(CreditsResponse { balance, consumed }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/orgs/{org_id}/billing/credits/consume",
+    tag = "Billing",
+    params(("org_id" = String, description = "Org UUID")),
+    request_body = ConsumeCreditsRequest,
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Credits consumed successfully"),
+        (status = 400, description = "Invalid request or insufficient balance", body = crate::common::ApiErrorResp),
+        (status = 401, description = "Unauthorized", body = crate::common::ApiErrorResp),
+        (status = 403, description = "Forbidden", body = crate::common::ApiErrorResp),
+        (status = 500, description = "Billing not configured", body = crate::common::ApiErrorResp)
+    )
+)]
+pub async fn consume_credits(
+    State(state): State<AppState>,
+    RequireOrgBillingAccess(user, org_id): RequireOrgBillingAccess,
+    req: Result<Json<ConsumeCreditsRequest>, JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(req) = req?;
+    req.validate().map_err(|e| ApiError::UnprocessableEntity(e.to_string()))?;
+    let billing = state
+        .billing_service
+        .as_ref()
+        .ok_or(ApiError::InternalError(anyhow::anyhow!(
+            "Billing not configured"
+        )))?;
+
+    billing
+        .consume_credits(user.id, org_id, req.amount)
+        .await?;
+
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 #[utoipa::path(
     get,
     path = "/v1/orgs/{org_id}/billing/transactions",
@@ -510,6 +589,8 @@ pub fn org_billing_router(_state: &AppState) -> Router<AppState> {
     Router::new()
         .route("/plans", get(list_plans))
         .route("/packages", get(list_packages))
+        .route("/credits", get(credits))
+        .route("/credits/consume", post(consume_credits))
         .route("/checkout", post(checkout))
         .route("/portal", get(org_portal))
         .route("/subscription", get(get_subscription))

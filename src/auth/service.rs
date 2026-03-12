@@ -325,6 +325,33 @@ impl AuthService {
         Ok(user)
     }
 
+    /// Create a short-lived token for WebSocket connection. Expires in 60 seconds.
+    pub fn create_ws_token(&self, user_id: UserId) -> Result<String, ApiError> {
+        let secret =
+            self.cfg.jwt_secret.as_deref().ok_or_else(|| {
+                ApiError::InternalError(anyhow::anyhow!("JWT_SECRET not configured"))
+            })?;
+
+        const WS_TOKEN_EXPIRY_SECS: i64 = 60;
+        let now = Utc::now();
+        let exp = now + chrono::Duration::seconds(WS_TOKEN_EXPIRY_SECS);
+        let jti = uuid::Uuid::now_v7().to_string();
+        let claims = Claims {
+            sub: user_id.0.to_string(),
+            jti,
+            exp: exp.timestamp(),
+            iat: now.timestamp(),
+            impersonated_by: None,
+        };
+
+        encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .map_err(|e| ApiError::InternalError(e.into()))
+    }
+
     pub fn create_access_token(&self, user_id: UserId) -> Result<String, ApiError> {
         let secret =
             self.cfg.jwt_secret.as_deref().ok_or_else(|| {

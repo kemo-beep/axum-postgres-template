@@ -141,6 +141,7 @@ pub fn router() -> Router<AppState> {
         .route("/google", get(google_redirect))
         .route("/google/callback", get(google_callback))
         .route("/me", get(me))
+        .route("/ws-token", get(ws_token))
         .route("/me/export", get(me_export))
         .route("/me/delete", post(me_delete))
         .route("/me/delete-permanent", post(me_delete_permanent))
@@ -517,6 +518,18 @@ pub async fn logout(
     let cookie_name = state.cfg.cookie_name.clone();
     let cleared_jar = jar.remove(Cookie::build(cookie_name).path("/").removal());
     Ok((cleared_jar, Json(serde_json::json!({ "ok": true }))))
+}
+
+/// Get a short-lived token for WebSocket connection. Requires auth.
+pub async fn ws_token(
+    State(state): State<AppState>,
+    RequireAuth(user): RequireAuth,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let auth = state.auth_service.as_ref().ok_or(ApiError::InternalError(
+        anyhow::anyhow!("Auth not configured"),
+    ))?;
+    let token = auth.create_ws_token(user.id)?;
+    Ok(Json(serde_json::json!({ "token": token })))
 }
 
 /// Get current user. Requires Authorization: Bearer &lt;token&gt;.

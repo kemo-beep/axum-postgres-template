@@ -233,6 +233,65 @@ impl BillingService {
         Ok((sub, credit))
     }
 
+    /// Get org credit balance. Returns 0 if no row exists.
+    pub async fn get_org_credits(&self, org_id: OrgId) -> Result<i64, ApiError> {
+        let creds = self
+            .billing_repo
+            .get_org_credits(org_id)
+            .await
+            .map_err(ApiError::InternalError)?;
+        Ok(creds.map(|c| c.balance).unwrap_or(0))
+    }
+
+    /// Get org credit stats: balance (remaining) and total consumed.
+    pub async fn get_org_credit_stats(&self, org_id: OrgId) -> Result<(i64, i64), ApiError> {
+        let balance = self.get_org_credits(org_id).await?;
+        let consumed = self
+            .billing_repo
+            .get_org_consumed_credits(org_id)
+            .await
+            .map_err(ApiError::InternalError)?;
+        Ok((balance, consumed))
+    }
+
+    /// Consume org credits (record usage). Fails if balance insufficient.
+    pub async fn consume_credits(
+        &self,
+        user_id: UserId,
+        org_id: OrgId,
+        amount: i64,
+    ) -> Result<(), ApiError> {
+        if amount <= 0 {
+            return Err(ApiError::InvalidRequest("amount must be positive".into()));
+        }
+        let debited = self
+            .billing_repo
+            .try_debit_org_credits(org_id, amount)
+            .await
+            .map_err(ApiError::InternalError)?;
+        if !debited {
+            return Err(ApiError::InvalidRequest(
+                "Insufficient credit balance".into(),
+            ));
+        }
+        self.billing_repo
+            .add_credit_transaction(
+                user_id,
+                org_id,
+                None,
+                -amount,
+                0,
+                "usd",
+                "usage",
+                None,
+                None,
+                None,
+            )
+            .await
+            .map_err(ApiError::InternalError)?;
+        Ok(())
+    }
+
     pub fn new(
         stripe_config: StripeConfig,
         billing_repo: BillingRepository,
@@ -911,20 +970,44 @@ impl BillingService {
                 .and_then(|c| c.as_str())
                 .unwrap_or("usd");
 
-            let line_items = session.get("line_items");
-            let price_value = line_items
+            // Webhooks don't include line_items by default; fetch via API when empty
+            let mut price_id = session
+                .get("line_items")
                 .and_then(|li| li.get("data"))
                 .and_then(|d| d.as_array())
                 .and_then(|arr| arr.first())
-                .and_then(|first| first.get("price"));
-            let price_id = price_value
-                .and_then(|p| p.as_str())
-                .or_else(|| price_value.and_then(|p| p.get("id").and_then(|id| id.as_str())))
-                .unwrap_or("");
+                .and_then(|first| first.get("price"))
+                .and_then(|p| {
+                    p.as_str()
+                        .map(String::from)
+                        .or_else(|| p.get("id").and_then(|id| id.as_str()).map(String::from))
+                })
+                .unwrap_or_default();
+
+            if price_id.is_empty() {
+                if let Some(session_id) = session.get("id").and_then(|v| v.as_str()) {
+                    if let Ok(parsed) = session_id.parse::<stripe::CheckoutSessionId>() {
+                        let params = RetrieveCheckoutSessionLineItems::default();
+                        if let Ok(list) = stripe_timeout(CheckoutSession::retrieve_line_items(
+                            &self.stripe_client,
+                            &parsed,
+                            &params,
+                        ))
+                        .await
+                        {
+                            if let Some(first) = list.data.first() {
+                                if let Some(ref price) = first.price {
+                                    price_id = price.id.as_str().to_string();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
             let package = self
                 .billing_repo
-                .get_package_by_stripe_price_id(price_id)
+                .get_package_by_stripe_price_id(&price_id)
                 .await
                 .map_err(ApiError::InternalError)?;
 

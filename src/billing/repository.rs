@@ -96,6 +96,12 @@ pub struct UserCredits {
     pub balance: i64,
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct OrgCredits {
+    pub org_id: OrgId,
+    pub balance: i64,
+}
+
 /// Database access for plans, subscriptions, packages, and transactions.
 #[derive(Clone)]
 pub struct BillingRepository {
@@ -689,6 +695,19 @@ impl BillingRepository {
         Ok(())
     }
 
+    pub async fn get_org_credits(&self, org_id: OrgId) -> Result<Option<OrgCredits>> {
+        let row = sqlx::query(
+            "SELECT org_id, balance FROM org_credits WHERE org_id = $1",
+        )
+        .bind(org_id.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r: sqlx::postgres::PgRow| OrgCredits {
+            org_id: OrgId(r.get("org_id")),
+            balance: r.get("balance"),
+        }))
+    }
+
     pub async fn upsert_org_credits(&self, org_id: OrgId, delta: i64) -> Result<()> {
         let now = Utc::now();
         sqlx::query(
@@ -703,6 +722,38 @@ impl BillingRepository {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Sum of tokens consumed (usage transactions) for the org. Usage records have negative amount_tokens.
+    pub async fn get_org_consumed_credits(&self, org_id: OrgId) -> Result<i64> {
+        let val: Option<i64> = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(ABS(amount_tokens)), 0)::bigint FROM credit_transactions WHERE org_id = $1 AND kind = 'usage'",
+        )
+        .bind(org_id.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(val.unwrap_or(0))
+    }
+
+    /// Atomically debit org credits. Returns true if debited, false if insufficient balance.
+    /// Only updates when balance >= amount.
+    pub async fn try_debit_org_credits(&self, org_id: OrgId, amount: i64) -> Result<bool> {
+        if amount <= 0 {
+            return Ok(true);
+        }
+        let now = Utc::now();
+        let result = sqlx::query(
+            r#"
+            UPDATE org_credits SET balance = balance - $1, updated_at = $2
+            WHERE org_id = $3 AND balance >= $1
+            "#,
+        )
+        .bind(amount)
+        .bind(now)
+        .bind(org_id.0)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     pub async fn list_subscription_transactions(
