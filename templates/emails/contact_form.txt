@@ -1,0 +1,7 @@
+Contact form submission
+
+From: {{ from_name }} <{{ from_email }}>
+Subject: {{ subject }}
+
+Message:
+{{ message }}

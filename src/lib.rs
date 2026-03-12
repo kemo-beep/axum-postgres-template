@@ -23,6 +23,7 @@ pub use db::*;
 #[derive(OpenApi)]
 #[openapi(
     paths(
+        routes::contact::contact_submit,
         routes::health_check::health_check,
         auth::routes::send_code,
         auth::routes::verify_code,
@@ -123,6 +124,8 @@ pub use db::*;
             feature_flags::routes::SetFlagRequest,
             routes::impersonate::ImpersonateRequest,
             routes::impersonate::ImpersonateResponse,
+            routes::contact::ContactRequest,
+            routes::contact::ContactResponse,
             routes::job_stats::JobStatsResponse,
         )
     ),
@@ -176,6 +179,8 @@ use crate::storage::StorageService;
 pub struct AppState {
     pub db: Db,
     pub cfg: Config,
+    /// Email sender for transactional emails. Used by auth, billing, and contact form.
+    pub email_sender: Option<Arc<dyn crate::auth::EmailSender>>,
     pub auth_service: Option<AuthService>,
     pub api_key_service: Option<crate::auth::api_key_service::ApiKeyService>,
     pub billing_service: Option<BillingService>,
@@ -190,10 +195,14 @@ pub struct AppState {
 pub fn router(cfg: Config, db: Db, storage_service: Option<StorageService>) -> Router {
     let job_queue = Arc::new(ObservantJobQueue::default());
 
+    let email_sender: Option<Arc<dyn crate::auth::EmailSender>> =
+        match &cfg.smtp {
+            Some(smtp) => Some(Arc::new(crate::auth::SmtpEmailSender::new(smtp.clone()))),
+            None => Some(Arc::new(crate::auth::ConsoleEmailSender)),
+        };
+
     let auth_service = cfg.jwt_secret.as_ref().map(|_| {
         use crate::auth::repository::{EmailCodeRepository, RbacRepository, UserRepository};
-        use crate::auth::{ConsoleEmailSender, EmailSender};
-        use std::sync::Arc;
 
         let user_repo = UserRepository::new(db.pool.clone());
         let email_code_repo = EmailCodeRepository::new(db.pool.clone());
@@ -202,41 +211,31 @@ pub fn router(cfg: Config, db: Db, storage_service: Option<StorageService>) -> R
         let token_blacklist_repo =
             crate::auth::repository::TokenBlacklistRepository::new(db.pool.clone());
         let rbac_repo = RbacRepository::new(db.pool.clone());
-        let email_sender: Arc<dyn EmailSender> = match &cfg.smtp {
-            Some(smtp) => Arc::new(crate::auth::SmtpEmailSender::new(smtp.clone())),
-            None => Arc::new(ConsoleEmailSender),
-        };
         AuthService::new(
             user_repo,
             email_code_repo,
             password_reset_repo,
             token_blacklist_repo,
             rbac_repo,
-            email_sender,
+            email_sender.clone().expect("email_sender set above"),
             cfg.clone(),
         )
     });
 
     let billing_service = cfg.stripe.as_ref().map(|stripe_cfg| {
         use crate::auth::repository::UserRepository;
-        use crate::auth::{ConsoleEmailSender, EmailSender};
         use crate::billing::repository::BillingRepository;
         use crate::org::repository::OrgRepository;
-        use std::sync::Arc;
 
         let billing_repo = BillingRepository::new(db.pool.clone());
         let user_repo = UserRepository::new(db.pool.clone());
         let org_repo = OrgRepository::new(db.pool.clone());
-        let email_sender: Arc<dyn EmailSender> = match &cfg.smtp {
-            Some(smtp) => Arc::new(crate::auth::SmtpEmailSender::new(smtp.clone())),
-            None => Arc::new(ConsoleEmailSender),
-        };
         BillingService::new(
             stripe_cfg.clone(),
             billing_repo,
             user_repo,
             org_repo,
-            email_sender,
+            email_sender.clone().expect("email_sender set above"),
             job_queue.clone(),
             cfg.frontend_url.clone(),
         )
@@ -282,6 +281,7 @@ pub fn router(cfg: Config, db: Db, storage_service: Option<StorageService>) -> R
     let app_state = AppState {
         db,
         cfg,
+        email_sender,
         auth_service,
         api_key_service,
         billing_service,

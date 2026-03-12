@@ -1,5 +1,6 @@
 use axum::{middleware, routing::get, routing::post, routing::put, Router};
 
+pub mod contact;
 pub mod health_check;
 pub mod impersonate;
 pub mod job_stats;

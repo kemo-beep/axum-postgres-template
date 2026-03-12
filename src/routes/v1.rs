@@ -7,6 +7,7 @@ use crate::AppState;
 /// Builds the v1 API router.
 pub fn router(state: &AppState) -> Router<AppState> {
     let api = Router::new()
+        .nest("/contact", crate::routes::contact::router())
         .nest("/auth", crate::auth::routes::router())
         .nest("/files", crate::storage::routes::router(state))
         .nest("/billing", crate::billing::routes::billing_router(state))

@@ -69,3 +69,21 @@ pub struct PastDueReminderHtml<'a> {
     pub hosted_invoice_url: Option<&'a str>,
     pub billing_url: Option<&'a str>,
 }
+
+#[derive(Template)]
+#[template(path = "emails/contact_form.txt")]
+pub struct ContactFormPlain<'a> {
+    pub from_name: &'a str,
+    pub from_email: &'a str,
+    pub subject: &'a str,
+    pub message: &'a str,
+}
+
+#[derive(Template)]
+#[template(path = "emails/contact_form.html")]
+pub struct ContactFormHtml<'a> {
+    pub from_name: &'a str,
+    pub from_email: &'a str,
+    pub subject: &'a str,
+    pub message: &'a str,
+}

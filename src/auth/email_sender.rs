@@ -10,9 +10,9 @@ const SMTP_TIMEOUT: Duration = Duration::from_secs(15);
 use askama::Template;
 
 use crate::auth::email_templates::{
-    LoginCodeHtml, LoginCodePlain, PastDueReminderHtml, PastDueReminderPlain, PaymentFailedHtml,
-    PaymentFailedPlain, PasswordResetHtml, PasswordResetPlain, TrialEndingSoonHtml,
-    TrialEndingSoonPlain,
+    ContactFormHtml, ContactFormPlain, LoginCodeHtml, LoginCodePlain, PastDueReminderHtml,
+    PastDueReminderPlain, PaymentFailedHtml, PaymentFailedPlain, PasswordResetHtml,
+    PasswordResetPlain, TrialEndingSoonHtml, TrialEndingSoonPlain,
 };
 
 /// Sends transactional emails for auth (login codes, password reset) and billing (payment failed).
@@ -54,6 +54,16 @@ pub trait EmailSender: Send + Sync {
         to: &'a str,
         hosted_invoice_url: Option<&'a str>,
         billing_url: Option<&'a str>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send + 'a>>;
+
+    /// Sends a contact form submission to the support inbox.
+    fn send_contact_form<'a>(
+        &'a self,
+        to: &'a str,
+        from_name: &'a str,
+        from_email: &'a str,
+        subject: &'a str,
+        message: &'a str,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send + 'a>>;
 }
 
@@ -132,6 +142,26 @@ impl EmailSender for ConsoleEmailSender {
                 hosted_invoice_url = ?hosted_invoice_url,
                 billing_url = ?billing_url,
                 "Would send past-due reminder email (SMTP not configured)"
+            );
+            Ok(())
+        })
+    }
+
+    fn send_contact_form<'a>(
+        &'a self,
+        to: &'a str,
+        from_name: &'a str,
+        from_email: &'a str,
+        subject: &'a str,
+        _message: &'a str,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send + 'a>> {
+        Box::pin(async move {
+            tracing::info!(
+                to = %to,
+                from_name = %from_name,
+                from_email = %from_email,
+                subject = %subject,
+                "Would send contact form email (SMTP not configured)"
             );
             Ok(())
         })
@@ -380,6 +410,70 @@ impl EmailSender for SmtpEmailSender {
                     .parse()
                     .map_err(|e: lettre::address::AddressError| anyhow::anyhow!("{}", e))?)
                 .subject("Subscription payment past due")
+                .multipart(MultiPart::alternative_plain_html(plain, html))?;
+
+            let creds = Credentials::new(config.user.clone(), config.password.clone());
+            let mailer = AsyncSmtpTransport::<Tokio1Executor>::relay(&config.host)?
+                .port(config.port)
+                .credentials(creds)
+                .build();
+
+            tokio::time::timeout(SMTP_TIMEOUT, mailer.send(email))
+                .await
+                .map_err(|_| anyhow::anyhow!("SMTP send timed out"))??;
+            Ok(())
+        })
+    }
+
+    fn send_contact_form<'a>(
+        &'a self,
+        to: &'a str,
+        from_name: &'a str,
+        from_email: &'a str,
+        subject: &'a str,
+        message: &'a str,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send + 'a>> {
+        let config = self.config.clone();
+        let to = to.to_string();
+        let from_name = from_name.to_string();
+        let from_email = from_email.to_string();
+        let subject = subject.to_string();
+        let message = message.to_string();
+        Box::pin(async move {
+            use lettre::message::MultiPart;
+            use lettre::transport::smtp::authentication::Credentials;
+            use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
+
+            let plain = ContactFormPlain {
+                from_name: &from_name,
+                from_email: &from_email,
+                subject: &subject,
+                message: &message,
+            }
+            .render()?;
+            let html = ContactFormHtml {
+                from_name: &from_name,
+                from_email: &from_email,
+                subject: &subject,
+                message: &message,
+            }
+            .render()?;
+            let reply_to = format!("{} <{}>", from_name, from_email)
+                .parse()
+                .map_err(|e: lettre::address::AddressError| anyhow::anyhow!("{}", e))?;
+            let email_subject = format!("Contact form: {}", subject);
+            let email = Message::builder()
+                .from(
+                    config
+                        .from
+                        .parse()
+                        .map_err(|e: lettre::address::AddressError| anyhow::anyhow!("{}", e))?,
+                )
+                .reply_to(reply_to)
+                .to(to
+                    .parse()
+                    .map_err(|e: lettre::address::AddressError| anyhow::anyhow!("{}", e))?)
+                .subject(&email_subject)
                 .multipart(MultiPart::alternative_plain_html(plain, html))?;
 
             let creds = Credentials::new(config.user.clone(), config.password.clone());

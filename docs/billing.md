@@ -56,3 +56,7 @@ For token package (one-time) purchases:
 ## Background Reconciliation
 
 A background job runs hourly to fix drift from missed webhooks. It finds subscriptions where `cancel_at_period_end=true`, `current_period_end < now()`, and status still active → sets `status='canceled'`.
+
+---
+
+See also: [stripe-setup.md](stripe-setup.md) for account setup and chargeback reduction tips.
